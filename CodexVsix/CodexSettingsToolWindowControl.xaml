@@ -5,7 +5,11 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:themes="clr-namespace:Microsoft.VisualStudio.PlatformUI;assembly=Microsoft.VisualStudio.Shell.15.0"
              mc:Ignorable="d"
-             Loaded="OnLoaded">
+             Loaded="OnLoaded"
+             FontFamily="Segoe UI"
+             FontSize="12"
+             UseLayoutRounding="True"
+             TextOptions.TextFormattingMode="Display">
     <UserControl.Resources>
         <SolidColorBrush x:Key="WindowBrush" Color="{DynamicResource {x:Static themes:EnvironmentColors.ToolWindowBackgroundColorKey}}" />
         <SolidColorBrush x:Key="PanelBorderBrush" Color="{DynamicResource {x:Static themes:EnvironmentColors.ToolWindowBorderColorKey}}" />

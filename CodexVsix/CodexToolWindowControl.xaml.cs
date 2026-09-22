@@ -123,7 +123,7 @@ public partial class CodexToolWindowControl : UserControl, IDisposable
     private void UpdatePromptTextBoxMaxHeight()
     {
         var availableHeight = ActualHeight > 0 ? ActualHeight : SystemParameters.WorkArea.Height;
-        PromptTextBox.MaxHeight = Math.Max(PromptTextBox.MinHeight, availableHeight * 0.5d);
+        PromptTextBox.MaxHeight = Math.Max(PromptTextBox.MinHeight, Math.Min(200d, availableHeight * 0.3d));
     }
 
     private void OnMessagesCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -295,6 +295,23 @@ public partial class CodexToolWindowControl : UserControl, IDisposable
         element.ContextMenu.PlacementTarget = element;
         element.ContextMenu.IsOpen = true;
         e.Handled = true;
+    }
+
+    private void OnPermissionsPopupOpened(object sender, EventArgs e)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        SandboxComboBox.Focus();
+    }
+
+    private void OnPermissionsPopupPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        if (e.Key == Key.Escape && !SandboxComboBox.IsDropDownOpen && !ApprovalComboBox.IsDropDownOpen)
+        {
+            PermissionsToggle.IsChecked = false;
+            PermissionsToggle.Focus();
+            e.Handled = true;
+        }
     }
 
     private void OnOpenHistoryPanelClick(object sender, RoutedEventArgs e)

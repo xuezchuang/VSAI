@@ -20,6 +20,7 @@ public sealed class CodexProcessService : IDisposable
     internal const string IdeContextHeading = "# Context from my IDE setup:";
     internal const string PromptRequestBegin = "## My request for Codex:";
     private const int MaxSessionLinesToParse = 1200;
+    private static readonly TimeSpan TurnInterruptTimeout = TimeSpan.FromSeconds(5);
     private const int MaxInitialThreadTurnsToLoad = 120;
     private const int MaxPromptHistoryPromptsPerThread = 120;
     private const int MaxPromptHistoryFallbackEntryLength = 12000;
@@ -141,12 +142,14 @@ public sealed class CodexProcessService : IDisposable
             await RefreshSkillsAsync(workingDirectory, cancellationToken).ConfigureAwait(false);
 
             var turnState = new ActiveTurnState(onOutput, onError, onEventMessage, onTokenUsage);
+            long generation;
             lock (_syncRoot)
             {
                 _activeTurn = turnState;
+                generation = _serverGeneration;
             }
 
-            using (cancellationToken.Register(() => _ = InterruptActiveTurnAsync()))
+            using (cancellationToken.Register(() => _ = CancelTurnAsync(turnState, generation)))
             {
                 try
                 {
@@ -164,6 +167,11 @@ public sealed class CodexProcessService : IDisposable
                     var exitCode = await turnState.Completion.Task.ConfigureAwait(false);
                     cancellationToken.ThrowIfCancellationRequested();
                     return exitCode;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    await CancelTurnAsync(turnState, generation).ConfigureAwait(false);
+                    throw;
                 }
                 finally
                 {
@@ -211,26 +219,62 @@ public sealed class CodexProcessService : IDisposable
         _ = CancelActiveTurnAsync();
     }
 
-    public async Task CancelActiveTurnAsync()
+    public Task CancelActiveTurnAsync()
     {
         ActiveTurnState? turnState;
+        long generation;
         lock (_syncRoot)
         {
             turnState = _activeTurn;
+            generation = _serverGeneration;
         }
 
-        if (turnState is null)
+        return turnState is null ? Task.CompletedTask : CancelTurnAsync(turnState, generation);
+    }
+
+    [SuppressMessage("Usage", "VSTHRD003:Avoid awaiting foreign Tasks", Justification = "The cancellation completion source uses RunContinuationsAsynchronously and is completed directly by the interruption workflow without a Visual Studio UI continuation.")]
+    private Task CancelTurnAsync(ActiveTurnState turnState, long generation)
+    {
+        TaskCompletionSource<bool> completion;
+        string? threadId;
+        lock (_syncRoot)
         {
-            return;
+            if (turnState.CancellationTask is not null)
+            {
+                return turnState.CancellationTask;
+            }
+
+            if (!ReferenceEquals(_activeTurn, turnState) || _serverGeneration != generation)
+            {
+                return Task.CompletedTask;
+            }
+
+            completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            turnState.CancellationTask = completion.Task;
+            threadId = _threadId;
         }
 
-        var interrupted = await InterruptActiveTurnAsync().ConfigureAwait(false);
-        if (!interrupted)
+        _ = Task.Run(() => CancelTurnCoreAsync(turnState, threadId, generation, completion));
+        return completion.Task;
+    }
+
+    private async Task CancelTurnCoreAsync(ActiveTurnState turnState, string? threadId, long generation, TaskCompletionSource<bool> completion)
+    {
+        try
         {
-            RestartServer(clearConfig: false);
-        }
+            var interrupted = await InterruptActiveTurnAsync(turnState, threadId, generation).ConfigureAwait(false);
+            if (!interrupted)
+            {
+                RestartServerIfCurrent(clearConfig: false, expectedGeneration: generation, expectedTurn: turnState);
+            }
 
-        turnState.TrySetResult(1);
+            turnState.TrySetResult(1);
+            completion.TrySetResult(true);
+        }
+        catch (Exception ex)
+        {
+            completion.TrySetException(ex);
+        }
     }
 
     public async Task<bool> SteerActiveTurnAsync(
@@ -1258,7 +1302,7 @@ public sealed class CodexProcessService : IDisposable
 
         if (message["id"] is not null && message["method"] is not null)
         {
-            _ = HandleServerRequestAsync(message);
+            _ = HandleServerRequestAsync(message, generation);
             return;
         }
 
@@ -1316,7 +1360,7 @@ public sealed class CodexProcessService : IDisposable
         tcs.TrySetResult(message["result"]);
     }
 
-    private async Task HandleServerRequestAsync(JObject message)
+    private async Task HandleServerRequestAsync(JObject message, long generation)
     {
         var id = message["id"];
         var method = message["method"]?.Value<string>() ?? string.Empty;
@@ -1327,6 +1371,14 @@ public sealed class CodexProcessService : IDisposable
             if (appServerRequestHandler is not null)
             {
                 var webViewResponse = await appServerRequestHandler((JObject)message.DeepClone()).ConfigureAwait(false);
+                lock (_syncRoot)
+                {
+                    if (_serverGeneration != generation)
+                    {
+                        return;
+                    }
+                }
+
                 if (webViewResponse is not null)
                 {
                     if (webViewResponse["error"] is JToken error)
@@ -1335,11 +1387,11 @@ public sealed class CodexProcessService : IDisposable
                         var errorMessage = ExtractAppServerErrorMessage(
                             error,
                             "The Codex interface could not resolve the app-server request.");
-                        await SendErrorResponseAsync(id, errorCode, errorMessage).ConfigureAwait(false);
+                        await SendErrorResponseAsync(generation, id, errorCode, errorMessage).ConfigureAwait(false);
                     }
                     else
                     {
-                        await SendResponseAsync(id, webViewResponse["result"]?.DeepClone() ?? new JObject()).ConfigureAwait(false);
+                        await SendResponseAsync(generation, id, webViewResponse["result"]?.DeepClone() ?? new JObject()).ConfigureAwait(false);
                     }
 
                     return;
@@ -1351,6 +1403,7 @@ public sealed class CodexProcessService : IDisposable
                 var approvalRequest = BuildApprovalRequest(method, parameters);
                 var decision = await ResolveApprovalDecisionAsync(approvalRequest).ConfigureAwait(false);
                 await SendResponseAsync(
+                    generation,
                     id,
                     new JObject
                     {
@@ -1363,7 +1416,7 @@ public sealed class CodexProcessService : IDisposable
             {
                 var userInputRequest = BuildUserInputRequest(parameters);
                 var response = await ResolveUserInputRequestAsync(userInputRequest).ConfigureAwait(false);
-                await SendResponseAsync(id, response ?? new JObject { ["answers"] = new JObject() }).ConfigureAwait(false);
+                await SendResponseAsync(generation, id, response ?? new JObject { ["answers"] = new JObject() }).ConfigureAwait(false);
                 return;
             }
 
@@ -1386,7 +1439,7 @@ public sealed class CodexProcessService : IDisposable
                     }
                 };
                 var permissions = await ResolveApprovalDecisionAsync(request).ConfigureAwait(false);
-                await SendResponseAsync(id, new JObject
+                await SendResponseAsync(generation, id, new JObject
                 {
                     ["permissions"] = permissions is JObject ? permissions : new JObject(),
                     ["scope"] = "turn"
@@ -1397,13 +1450,13 @@ public sealed class CodexProcessService : IDisposable
             if (string.Equals(method, "mcpServer/elicitation/request", StringComparison.Ordinal))
             {
                 var response = await ResolveMcpElicitationAsync(parameters).ConfigureAwait(false);
-                await SendResponseAsync(id, response).ConfigureAwait(false);
+                await SendResponseAsync(generation, id, response).ConfigureAwait(false);
                 return;
             }
 
             if (string.Equals(method, "item/tool/call", StringComparison.Ordinal))
             {
-                await SendResponseAsync(id, new JObject
+                await SendResponseAsync(generation, id, new JObject
                 {
                     ["success"] = false,
                     ["contentItems"] = new JArray(new JObject
@@ -1417,19 +1470,32 @@ public sealed class CodexProcessService : IDisposable
 
             if (string.Equals(method, "currentTime/read", StringComparison.Ordinal))
             {
-                await SendResponseAsync(id, new JObject
+                await SendResponseAsync(generation, id, new JObject
                 {
                     ["currentTimeAt"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
                 }).ConfigureAwait(false);
                 return;
             }
 
-            await SendErrorResponseAsync(id, -32601, "Method not supported by the Visual Studio client: " + method).ConfigureAwait(false);
+            await SendErrorResponseAsync(generation, id, -32601, "Method not supported by the Visual Studio client: " + method).ConfigureAwait(false);
+        }
+        catch (CodexServerRequestResolvedException)
+        {
+            // The server has already completed this interactive request.
+            return;
         }
         catch (Exception ex)
         {
+            lock (_syncRoot)
+            {
+                if (_serverGeneration != generation)
+                {
+                    return;
+                }
+            }
+
             PublishError("[" + GetLocalization().OutputTagAppServer + "] " + ex.Message + Environment.NewLine);
-            await SendErrorResponseAsync(id, -32603, ex.Message).ConfigureAwait(false);
+            await SendErrorResponseAsync(generation, id, -32603, ex.Message).ConfigureAwait(false);
         }
     }
 
@@ -1884,34 +1950,20 @@ public sealed class CodexProcessService : IDisposable
         turnState.OnOutput(text!);
     }
 
-    private async Task<bool> InterruptActiveTurnAsync()
+    private async Task<bool> InterruptActiveTurnAsync(ActiveTurnState turnState, string? threadId, long generation)
     {
-        ActiveTurnState? turnState;
-        string? threadId;
-        lock (_syncRoot)
-        {
-            turnState = _activeTurn;
-            threadId = _threadId;
-        }
-
-        if (turnState is null || string.IsNullOrWhiteSpace(turnState.TurnId) || string.IsNullOrWhiteSpace(threadId))
+        if (string.IsNullOrWhiteSpace(turnState.TurnId) || string.IsNullOrWhiteSpace(threadId))
         {
             return false;
         }
 
-        if (turnState.InterruptRequested)
-        {
-            return true;
-        }
-
-        turnState.InterruptRequested = true;
-
+        using var timeout = new CancellationTokenSource(TurnInterruptTimeout);
         try
         {
             await SendRequestAsync(
                 "turn/interrupt",
                 new { threadId, turnId = turnState.TurnId },
-                CancellationToken.None).ConfigureAwait(false);
+                timeout.Token, generation).ConfigureAwait(false);
             return true;
         }
         catch
@@ -1920,7 +1972,7 @@ public sealed class CodexProcessService : IDisposable
         }
     }
 
-    private async Task<JToken?> SendRequestAsync(string method, object? parameters, CancellationToken cancellationToken)
+    private async Task<JToken?> SendRequestAsync(string method, object? parameters, CancellationToken cancellationToken, long? expectedGeneration = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var id = Interlocked.Increment(ref _nextRequestId);
@@ -1929,7 +1981,8 @@ public sealed class CodexProcessService : IDisposable
 
         lock (_syncRoot)
         {
-            if (_serverInput is null || _serverProcess is null || _serverProcess.HasExited)
+            if ((expectedGeneration.HasValue && expectedGeneration.Value != _serverGeneration)
+                || _serverInput is null || _serverProcess is null || _serverProcess.HasExited)
             {
                 throw new InvalidOperationException(GetLocalization().AppServerUnavailable);
             }
@@ -2008,18 +2061,18 @@ public sealed class CodexProcessService : IDisposable
         return Task.CompletedTask;
     }
 
-    private Task SendResponseAsync(JToken? id, JToken result)
+    private Task SendResponseAsync(long generation, JToken? id, JToken result)
     {
         WriteMessage(new JObject
         {
             ["id"] = id,
             ["result"] = result
-        });
+        }, generation, discardIfStale: true);
 
         return Task.CompletedTask;
     }
 
-    private Task SendErrorResponseAsync(JToken? id, int code, string message)
+    private Task SendErrorResponseAsync(long generation, JToken? id, int code, string message)
     {
         WriteMessage(new JObject
         {
@@ -2029,7 +2082,7 @@ public sealed class CodexProcessService : IDisposable
                 ["code"] = code,
                 ["message"] = message ?? string.Empty
             }
-        });
+        }, generation, discardIfStale: true);
 
         return Task.CompletedTask;
     }
@@ -2044,13 +2097,18 @@ public sealed class CodexProcessService : IDisposable
         return parameters is JToken token ? token : JToken.FromObject(parameters);
     }
 
-    private void WriteMessage(JObject message, long? expectedGeneration = null)
+    private void WriteMessage(JObject message, long? expectedGeneration = null, bool discardIfStale = false)
     {
         StreamWriter? writer;
         lock (_syncRoot)
         {
             if (expectedGeneration.HasValue && expectedGeneration.Value != _serverGeneration)
             {
+                if (discardIfStale)
+                {
+                    return;
+                }
+
                 throw new InvalidOperationException(GetLocalization().AppServerUnavailable);
             }
 
@@ -4646,6 +4704,8 @@ public sealed class CodexProcessService : IDisposable
             }
 
             turnState = _activeTurn;
+            _activeTurn = null;
+            ++_serverGeneration;
             input = _serverInput;
             _threadId = null;
             _threadConfigKey = null;
@@ -4684,12 +4744,27 @@ public sealed class CodexProcessService : IDisposable
 
     private void RestartServer(bool clearConfig)
     {
+        RestartServerIfCurrent(clearConfig, null, null);
+    }
+
+    private void RestartServerIfCurrent(bool clearConfig, long? expectedGeneration, ActiveTurnState? expectedTurn)
+    {
         Process? process;
+        ActiveTurnState? turnState;
         StreamWriter? input;
         List<TaskCompletionSource<JToken?>> pendingRequests;
 
         lock (_syncRoot)
         {
+            if ((expectedGeneration.HasValue && expectedGeneration.Value != _serverGeneration)
+                || (expectedTurn is not null && !ReferenceEquals(_activeTurn, expectedTurn)))
+            {
+                return;
+            }
+
+            turnState = _activeTurn;
+            _activeTurn = null;
+            ++_serverGeneration;
             process = _serverProcess;
             input = _serverInput;
             pendingRequests = _pendingRequests.Values.Select(request => request.Completion).ToList();
@@ -4708,6 +4783,8 @@ public sealed class CodexProcessService : IDisposable
                 _serverConfigKey = null;
             }
         }
+
+        turnState?.TrySetResult(1);
 
         foreach (var pendingRequest in pendingRequests)
         {
@@ -5333,12 +5410,7 @@ public sealed class CodexProcessService : IDisposable
 
     private static string ResolveWorkingDirectory(string workingDirectory)
     {
-        if (!string.IsNullOrWhiteSpace(workingDirectory) && Directory.Exists(workingDirectory))
-        {
-            return workingDirectory;
-        }
-
-        return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return CodexWorkingDirectory.Resolve(workingDirectory);
     }
 
     internal static string NormalizeComparablePath(string? path)
@@ -5485,7 +5557,7 @@ public sealed class CodexProcessService : IDisposable
         public Dictionary<string, StringBuilder> PlanTextByItemId { get; } = new(StringComparer.Ordinal);
         public string? TurnId { get; set; }
         public bool HasAssistantOutput { get; set; }
-        public bool InterruptRequested { get; set; }
+        public Task? CancellationTask { get; set; }
 
         public string AppendPlanDelta(string? itemId, string delta)
         {

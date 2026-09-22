@@ -31,8 +31,15 @@ internal sealed class CodexDiagnosticLogger
         @"\b(?:sk|sess|pat)-[A-Za-z0-9_-]{10,}\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    private const string SensitiveNamePattern =
+        @"(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|token|password|secret|authorization|cookie|set-cookie)";
+
+    private static readonly Regex SensitivePropertyNameRegex = new(
+        "^" + SensitiveNamePattern + "$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     private static readonly Regex SensitiveAssignmentRegex = new(
-        @"\b((?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth[_-]?token|password|secret))\s*[:=]\s*[^\s,;]+",
+        @"\b(" + SensitiveNamePattern + @")[""']?\s*[:=]\s*(?:""(?:\\.|[^""\\])*(?:""|$)|'(?:\\.|[^'\\])*(?:'|$)|[^\s,;]+)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private readonly object _syncRoot = new();
@@ -226,7 +233,9 @@ internal sealed class CodexDiagnosticLogger
                 var sanitizedObject = new JObject();
                 foreach (var property in sourceObject.Properties())
                 {
-                    sanitizedObject[property.Name] = SanitizeToken(property.Value);
+                    sanitizedObject[property.Name] = SensitivePropertyNameRegex.IsMatch(property.Name)
+                        ? new JValue("[redacted]")
+                        : SanitizeToken(property.Value);
                 }
 
                 return sanitizedObject;

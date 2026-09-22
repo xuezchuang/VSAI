@@ -48,12 +48,12 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
     private readonly SolutionContextService _solutionContextService = new();
     private readonly object _assistantOutputSync = new();
     private readonly StringBuilder _assistantOutputBuffer = new();
-    private readonly object _pendingFollowUpSync = new();
-    private readonly Queue<PendingSubmission> _pendingFollowUpPrompts = new();
+    private readonly ComposerSubmissionBuffer _composerSubmissions = new(MaxPendingFollowUpPrompts);
     private readonly HashSet<string> _ownedTempImagePaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _deferredTempImagePaths = new(StringComparer.OrdinalIgnoreCase);
 
     private CancellationTokenSource? _cts;
+    private ComposerSubmission? _activeComposerSubmission;
     private ChatMessage? _currentAssistantMessage;
     private ChatMessage? _currentPlanMessage;
     private ChatMessage? _currentTransientStatusMessage;
@@ -144,7 +144,8 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         ClearOutputCommand = new DelegateCommand(() => Output = string.Empty);
         ClearPromptHistoryCommand = new DelegateCommand(ClearPromptHistory);
         CompactConversationCommand = new DelegateCommand(CompactCurrentConversation);
-        UseSolutionDirectoryCommand = new DelegateCommand(UseSolutionDirectory);
+        UseSolutionDirectoryCommand = new DelegateCommand(UseSolutionDirectory, () => !IsBusy);
+        ChooseWorkingDirectoryCommand = new DelegateCommand(ChooseWorkingDirectory, () => !IsBusy);
         OpenCodexConfigCommand = new DelegateCommand(OpenCodexConfig);
         OpenExtensionSettingsCommand = new DelegateCommand(OpenExtensionSettings);
         OpenCodexSkillsFolderCommand = new DelegateCommand(OpenCodexSkillsFolder);
@@ -224,6 +225,10 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
+    internal event EventHandler? WorkingDirectoryChanged;
+
+    public string WorkspaceDirectory => CodexWorkingDirectory.Resolve(Settings);
+
     public LocalizationService Localization => _localization;
 
     internal CodexProcessService ProcessService => _codexProcessService;
@@ -236,18 +241,10 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         _cts?.Dispose();
         _mentionSearchCts?.Cancel();
         _mentionSearchCts?.Dispose();
-        lock (_pendingFollowUpSync)
-        {
-            foreach (var submission in _pendingFollowUpPrompts)
-            {
-                CleanupSubmissionTempImages(submission);
-            }
-
-            _pendingFollowUpPrompts.Clear();
-        }
+        _composerSubmissions.Reset(long.MinValue);
         foreach (var path in _ownedTempImagePaths.ToList())
         {
-            TryDeleteOwnedTempImage(path);
+            TryDeleteOwnedTempImage(path, force: true);
         }
         ClearPendingAssistantOutput();
         ManagedMcpServers.CollectionChanged -= HandleManagedMcpServersChanged;
@@ -382,6 +379,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
     public DelegateCommand ClearPromptHistoryCommand { get; }
     public DelegateCommand CompactConversationCommand { get; }
     public DelegateCommand UseSolutionDirectoryCommand { get; }
+    public DelegateCommand ChooseWorkingDirectoryCommand { get; }
     public DelegateCommand OpenCodexConfigCommand { get; }
     public DelegateCommand OpenExtensionSettingsCommand { get; }
     public DelegateCommand OpenCodexSkillsFolderCommand { get; }
@@ -527,6 +525,8 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
             SendCommand.RaiseCanExecuteChanged();
             CancelCommand.RaiseCanExecuteChanged();
             NewThreadCommand.RaiseCanExecuteChanged();
+            ChooseWorkingDirectoryCommand.RaiseCanExecuteChanged();
+            UseSolutionDirectoryCommand.RaiseCanExecuteChanged();
             BeginRenameThreadCommand.RaiseCanExecuteChanged();
             RenameThreadCommand.RaiseCanExecuteChanged();
             CancelRenameThreadCommand.RaiseCanExecuteChanged();
@@ -551,6 +551,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
             OnPropertyChanged(nameof(ShowSendActionIcon));
             OnPropertyChanged(nameof(ShowStopActionIcon));
             OnPropertyChanged(nameof(ShowStoppingIndicator));
+            SendCommand.RaiseCanExecuteChanged();
             CancelCommand.RaiseCanExecuteChanged();
             NewThreadCommand.RaiseCanExecuteChanged();
             DeleteThreadCommand.RaiseCanExecuteChanged();
@@ -1437,7 +1438,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         }
     }
 
-    private async Task SendAsync(PendingSubmission? queuedSubmission = null)
+    private async Task SendAsync(ComposerSubmission? queuedSubmission = null)
     {
         var promptToSend = queuedSubmission?.Prompt ?? BuildEffectivePrompt();
         var submission = queuedSubmission ?? CaptureComposerSubmission(promptToSend);
@@ -1449,6 +1450,11 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         if (!IsCodexReady)
         {
             AppendOutput("[" + _localization.OutputTagSetup + "] " + CodexSetupSummary + Environment.NewLine);
+            if (queuedSubmission is not null)
+            {
+                PreserveFailedSubmission(submission, CaptureConversationStateVersion());
+                CleanupSubmissionTempImages(submission);
+            }
             return;
         }
 
@@ -1463,7 +1469,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
 
         if (shouldAutoNameThread)
         {
-            BeginConversationStateChange();
+            // Initializing this conversation must preserve follow-ups already queued for it.
             Settings.CurrentThreadId = string.Empty;
             Settings.LastThreadWorkingDirectory = Settings.WorkingDirectory;
             _codexProcessService.ResetThread();
@@ -1476,16 +1482,13 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
 
         var conversationStateVersion = CaptureConversationStateVersion();
 
-        var ideContextSummary = await CaptureIdeContextSummaryAsync();
-
-        AddPromptToHistory(promptToSend);
-        SaveSettings();
-        ClearPersistedEventMessages();
-        AddUserMessage(promptToSend.Trim());
-
         IsBusy = true;
         IsStopping = false;
-        _cts = new CancellationTokenSource();
+        var submissionCts = new CancellationTokenSource();
+        _cts = submissionCts;
+        var submissionFailed = false;
+        var executionCompleted = false;
+        _activeComposerSubmission = submission;
         _currentAssistantMessage = null;
         _currentPlanMessage = null;
         ClearTransientStatusMessage();
@@ -1496,6 +1499,17 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
 
         try
         {
+            var ideContextSummary = await CaptureIdeContextSummaryAsync();
+            submissionCts.Token.ThrowIfCancellationRequested();
+            if (!IsConversationStateCurrent(conversationStateVersion))
+            {
+                return;
+            }
+
+            AddPromptToHistory(promptToSend);
+            SaveSettings();
+            ClearPersistedEventMessages();
+            AddUserMessage(promptToSend.Trim());
             var exitCode = await _codexProcessService.ExecuteAsync(
                 promptToSend,
                 Settings,
@@ -1529,8 +1543,10 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
                         UpdateTokenUsage(tokensInContextWindow, contextWindow);
                     }
                 },
-                cancellationToken: _cts.Token);
+                cancellationToken: submissionCts.Token);
 
+            executionCompleted = true;
+            submissionFailed = exitCode != 0;
             await FlushPendingAssistantOutputAsync();
 
             if (!IsConversationStateCurrent(conversationStateVersion))
@@ -1561,6 +1577,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         }
         catch (Exception ex)
         {
+            submissionFailed = !executionCompleted || submissionFailed;
             if (IsConversationStateCurrent(conversationStateVersion))
             {
                 AddAssistantMessage(_localization.ExecutionError + " " + ex.Message);
@@ -1576,14 +1593,28 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
                 ClearTransientStatusMessage();
             }
 
+            if (submissionFailed && IsConversationStateCurrent(conversationStateVersion))
+            {
+                PreserveFailedSubmission(submission, conversationStateVersion);
+            }
+
+            var ownsBusyState = ReferenceEquals(_cts, submissionCts);
+            if (ownsBusyState)
+            {
+                _activeComposerSubmission = null;
+            }
             CleanupSubmissionTempImages(submission);
-            CleanupDeferredTempImages();
-            IsStopping = false;
-            IsBusy = false;
-            var completedCts = _cts;
-            _cts = null;
-            completedCts?.Dispose();
-            SendQueuedFollowUpIfAvailable();
+            submissionCts.Dispose();
+            if (ownsBusyState)
+            {
+                CleanupDeferredTempImages();
+                _cts = null;
+                IsStopping = false;
+                IsBusy = false;
+                // Reset already discarded the old conversation's queue. A directory switch
+                // may have queued new, explicitly submitted work while this turn was ending.
+                SendQueuedFollowUpIfAvailable();
+            }
         }
     }
 
@@ -1644,7 +1675,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         return !IsBusy || !IsStopping;
     }
 
-    private PendingSubmission CaptureComposerSubmission(string prompt)
+    private ComposerSubmission CaptureComposerSubmission(string prompt)
     {
         var imagePaths = AttachedImages
             .Where(path => !string.IsNullOrWhiteSpace(path))
@@ -1653,7 +1684,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         var ownedPaths = imagePaths
             .Where(path => _ownedTempImagePaths.Contains(path))
             .ToList();
-        return new PendingSubmission(prompt, imagePaths, ownedPaths);
+        return new ComposerSubmission(prompt, imagePaths, ownedPaths);
     }
 
     private void ClearComposerSubmission()
@@ -1663,7 +1694,48 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         SelectedImagePath = null;
     }
 
-    private void CleanupSubmissionTempImages(PendingSubmission submission)
+    private void PreserveFailedSubmission(ComposerSubmission submission, long conversationVersion)
+    {
+        AddPromptToHistory(submission.Prompt);
+        var historyEntry = CreatePromptHistoryEntry(submission.Prompt);
+        foreach (var discarded in _composerSubmissions.RememberFailure(submission, historyEntry, conversationVersion))
+        {
+            CleanupSubmissionTempImages(discarded);
+        }
+
+        if (string.IsNullOrWhiteSpace(BuildEffectivePrompt()) && AttachedImages.Count == 0)
+        {
+            var recovery = _composerSubmissions.TakeRecovery(historyEntry, conversationVersion);
+            if (recovery is not null)
+            {
+                RestoreComposerSubmission(recovery);
+            }
+        }
+        else
+        {
+            AddAssistantMessage("The failed prompt and its attachments are saved in " + _localization.HistoryTitle
+                + ". Reuse that prompt to retry; your current draft is unchanged.");
+        }
+    }
+
+    private void RestoreComposerSubmission(ComposerSubmission submission)
+    {
+        var previousImages = AttachedImages.ToList();
+        AttachedImages.Clear();
+        Prompt = submission.Prompt;
+        foreach (var path in submission.ImagePaths)
+        {
+            AttachedImages.Add(path);
+        }
+        SelectedImagePath = AttachedImages.FirstOrDefault();
+        foreach (var path in previousImages.Where(path => _ownedTempImagePaths.Contains(path)))
+        {
+            TryDeleteOwnedTempImage(path);
+        }
+        UpdateContextEstimate();
+    }
+
+    private void CleanupSubmissionTempImages(ComposerSubmission submission)
     {
         foreach (var path in submission.OwnedTempImagePaths)
         {
@@ -1681,8 +1753,15 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         _deferredTempImagePaths.Clear();
     }
 
-    private void TryDeleteOwnedTempImage(string path)
+    private void TryDeleteOwnedTempImage(string path, bool force = false)
     {
+        if (!force && (AttachedImages.Contains(path, StringComparer.OrdinalIgnoreCase)
+            || _activeComposerSubmission?.ImagePaths.Contains(path, StringComparer.OrdinalIgnoreCase) == true
+            || _composerSubmissions.RetainsImage(path)))
+        {
+            return;
+        }
+
         _ownedTempImagePaths.Remove(path);
         _deferredTempImagePaths.Remove(path);
         try
@@ -1698,8 +1777,14 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         }
     }
 
-    private async Task CaptureFollowUpPromptAsync(PendingSubmission submission)
+    private async Task CaptureFollowUpPromptAsync(ComposerSubmission submission)
     {
+        if (IsStopping)
+        {
+            return;
+        }
+
+        var conversationVersion = CaptureConversationStateVersion();
         var mode = EnsureLiteralValue(Settings.FollowUpQueueMode, "queue", "queue", "steer", "interrupt");
         ClearComposerSubmission();
 
@@ -1708,12 +1793,21 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
             try
             {
                 var ideContextSummary = await CaptureIdeContextSummaryAsync();
-                if (await _codexProcessService.SteerActiveTurnAsync(
-                    submission.Prompt,
-                    Settings,
-                    submission.ImagePaths,
-                    ideContextSummary,
-                    CancellationToken.None))
+                if (!IsConversationStateCurrent(conversationVersion))
+                {
+                    CleanupSubmissionTempImages(submission);
+                    return;
+                }
+
+                var steered = await _codexProcessService.SteerActiveTurnAsync(
+                    submission.Prompt, Settings, submission.ImagePaths, ideContextSummary, CancellationToken.None);
+                if (!IsConversationStateCurrent(conversationVersion))
+                {
+                    CleanupSubmissionTempImages(submission);
+                    return;
+                }
+
+                if (steered)
                 {
                     AddPromptToHistory(submission.Prompt);
                     AddUserMessage(submission.Prompt.Trim());
@@ -1721,40 +1815,36 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
                     {
                         _deferredTempImagePaths.Add(path);
                     }
-
+                    if (!IsBusy)
+                    {
+                        CleanupDeferredTempImages();
+                    }
                     return;
                 }
             }
             catch (Exception ex)
             {
-                AppendOutput("[turn/steer] " + ex.Message + Environment.NewLine);
+                if (IsConversationStateCurrent(conversationVersion))
+                {
+                    AppendOutput("[turn/steer] " + ex.Message + Environment.NewLine);
+                }
             }
         }
 
-        EnqueueFollowUp(submission);
+        foreach (var discarded in _composerSubmissions.Enqueue(submission, conversationVersion))
+        {
+            CleanupSubmissionTempImages(discarded);
+        }
+        if (!IsConversationStateCurrent(conversationVersion))
+        {
+            return;
+        }
 
         if (string.Equals(mode, "interrupt", StringComparison.OrdinalIgnoreCase))
         {
             await CancelAsync();
         }
-    }
-
-    private void EnqueueFollowUp(PendingSubmission submission)
-    {
-        PendingSubmission? discarded = null;
-        lock (_pendingFollowUpSync)
-        {
-            _pendingFollowUpPrompts.Enqueue(submission);
-            while (_pendingFollowUpPrompts.Count > MaxPendingFollowUpPrompts)
-            {
-                discarded = _pendingFollowUpPrompts.Dequeue();
-            }
-        }
-
-        if (discarded is not null)
-        {
-            CleanupSubmissionTempImages(discarded);
-        }
+        SendQueuedFollowUpIfAvailable();
     }
 
     private void SendQueuedFollowUpIfAvailable()
@@ -1764,14 +1854,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
             return;
         }
 
-        PendingSubmission? nextSubmission;
-        lock (_pendingFollowUpSync)
-        {
-            nextSubmission = _pendingFollowUpPrompts.Count == 0
-                ? null
-                : _pendingFollowUpPrompts.Dequeue();
-        }
-
+        var nextSubmission = _composerSubmissions.Dequeue(CaptureConversationStateVersion());
         if (nextSubmission is null || string.IsNullOrWhiteSpace(nextSubmission.Prompt))
         {
             return;
@@ -2006,23 +2089,82 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         UpdateContextEstimate();
     }
 
+    private void ChooseWorkingDirectory()
+    {
+        ChangeWorkspaceFromCommand(() => WorkspaceDirectoryPicker.Pick(
+            Settings.WorkingDirectory,
+            _localization.ChooseWorkingDirectoryLabel), followSolutionDirectory: false);
+    }
+
     private void UseSolutionDirectory()
     {
-        ThreadHelper.JoinableTaskFactory.Run(async delegate
+        ChangeWorkspaceFromCommand(
+            () => _solutionContextService.GetBestWorkingDirectory(), followSolutionDirectory: true);
+    }
+
+    private void ChangeWorkspaceFromCommand(Func<string?> chooseDirectory, bool followSolutionDirectory)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        if (IsBusy)
         {
-            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-            ApplyWorkingDirectory(_solutionContextService.GetBestWorkingDirectory(), resetConversation: true);
-            OnPropertyChanged(nameof(Settings));
-            SaveSettings();
-            await RefreshThreadsAsync(Settings.CurrentThreadId).ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            var directory = chooseDirectory();
+            if (directory is not null)
+            {
+                SelectWorkingDirectory(directory, followSolutionDirectory);
+            }
+        }
+        catch (Exception ex)
+        {
+            ActivityLog.TryLogError("CodexVsix", "Could not change the working folder: " + ex);
+            MessageBox.Show(ex.Message, _localization.WorkingDirectoryLabel, MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    internal void SelectWorkingDirectory(string directory, bool followSolutionDirectory = false)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        if (IsBusy)
+        {
+            throw new InvalidOperationException("Wait for the current response to finish before changing the working folder.");
+        }
+
+        var changed = CodexWorkingDirectory.Select(
+            Settings, directory, followSolutionDirectory, settings => _settingsStore.Save(settings));
+        if (changed)
+        {
+            _solutionContextService.InvalidateFileIndex();
+            ApplyWorkingDirectory(Settings.WorkingDirectory, resetConversation: true);
+        }
+
+        OnPropertyChanged(nameof(Settings));
+        OnPropertyChanged(nameof(WorkspaceDirectory));
+        if (!changed)
+        {
+            return;
+        }
+
+        WorkingDirectoryChanged?.Invoke(this, EventArgs.Empty);
+        RunDetached(async delegate
+        {
+            await RefreshThreadsAsync(null).ConfigureAwait(false);
             await RefreshModelOptionsAsync().ConfigureAwait(false);
-            await RefreshServerSurfacesAsync().ConfigureAwait(false);
-        });
+            await RefreshServerSurfacesAsync(forceSkillReload: true).ConfigureAwait(false);
+        }, "CodexVsix/RefreshWorkspace");
     }
 
     private void ApplyStartupWorkingDirectory()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        if (!Settings.FollowSolutionDirectory)
+        {
+            return;
+        }
+
         var solutionDirectory = _solutionContextService.TryGetBestWorkspaceDirectory();
         if (string.IsNullOrWhiteSpace(solutionDirectory) || !Directory.Exists(solutionDirectory))
         {
@@ -2034,7 +2176,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
             return;
         }
 
-        ApplyWorkingDirectory(solutionDirectory!, resetConversation: true);
+        ApplyWorkingDirectory(CodexWorkingDirectory.Resolve(Settings, solutionDirectory), resetConversation: true);
         OnPropertyChanged(nameof(Settings));
         _settingsStore.Save(Settings);
     }
@@ -2492,281 +2634,33 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
     private bool CanOpenReferencedPath(object? parameter)
     {
         return parameter is string reference
-            && TryResolveReferencedFile(reference, out _);
+            && (SolutionContextService.TryResolveFileReference(reference, Settings.WorkingDirectory, out _)
+                || SolutionContextService.IsPotentialRelativeFileReference(reference));
     }
 
-    private bool TryResolveReferencedFile(string reference, out ReferencedFile resolved)
-    {
-        resolved = default;
-        var normalized = NormalizeReferencedFileText(reference);
-        if (string.IsNullOrWhiteSpace(normalized))
-        {
-            return false;
-        }
-
-        if (Uri.TryCreate(normalized, UriKind.Absolute, out var uri)
-            && string.Equals(uri.Scheme, Uri.UriSchemeFile, StringComparison.OrdinalIgnoreCase))
-        {
-            normalized = uri.LocalPath + uri.Fragment;
-        }
-        else if (Uri.TryCreate(normalized, UriKind.Absolute, out uri)
-            && uri.Scheme.Length != 1)
-        {
-            return false;
-        }
-
-        normalized = DecodeReferencedFileText(normalized);
-        var pathText = StripReferencedFilePosition(normalized, out var line, out var column);
-        pathText = NormalizeReferencedPathText(DecodeReferencedFileText(pathText));
-        foreach (var candidate in GetReferencedFileCandidates(pathText))
-        {
-            try
-            {
-                var fullPath = Path.GetFullPath(candidate);
-                if (File.Exists(fullPath))
-                {
-                    resolved = new ReferencedFile(fullPath, line, column);
-                    return true;
-                }
-            }
-            catch
-            {
-            }
-        }
-
-        return false;
-    }
-
-    private bool TryResolveReferencedFileWithSolution(string reference, out ReferencedFile resolved)
+    private bool TryResolveReferencedFileWithSolution(string reference, out SolutionContextService.FileNavigationTarget resolved)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        if (TryResolveReferencedFile(reference, out resolved))
+        if (SolutionContextService.TryResolveFileReference(reference, Settings.WorkingDirectory, out resolved))
         {
             return true;
         }
 
-        var normalized = NormalizeReferencedFileText(reference);
-        if (Uri.TryCreate(normalized, UriKind.Absolute, out var uri)
-            && string.Equals(uri.Scheme, Uri.UriSchemeFile, StringComparison.OrdinalIgnoreCase))
+        if (!SolutionContextService.TryParseFileReference(reference, out var parsed)
+            || Path.IsPathRooted(parsed.Path) || !Path.HasExtension(parsed.Path))
         {
-            normalized = uri.LocalPath + uri.Fragment;
+            return false;
         }
 
-        normalized = DecodeReferencedFileText(normalized);
-        var pathText = NormalizeReferencedPathText(DecodeReferencedFileText(
-            StripReferencedFilePosition(normalized, out var line, out var column)));
-        var solutionDirectory = _solutionContextService.TryGetSolutionDirectory();
-        foreach (var candidate in GetSolutionFileReferenceCandidates(pathText, solutionDirectory))
+        var candidate = SolutionContextService.FindUnambiguousSolutionFile(parsed.Path,
+            _solutionContextService.TryGetSolutionDirectory(), _solutionContextService.GetSolutionFilePaths());
+        if (candidate is null)
         {
-            if (File.Exists(candidate))
-            {
-                resolved = new ReferencedFile(Path.GetFullPath(candidate), line, column);
-                return true;
-            }
+            return false;
         }
 
-        return false;
-    }
-
-    private IEnumerable<string> GetReferencedFileCandidates(string pathText)
-    {
-        if (string.IsNullOrWhiteSpace(pathText))
-        {
-            yield break;
-        }
-
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (Path.IsPathRooted(pathText))
-        {
-            if (seen.Add(pathText))
-            {
-                yield return pathText;
-            }
-            yield break;
-        }
-
-        var workingDirectory = (Settings.WorkingDirectory ?? string.Empty).Trim();
-        if (!string.IsNullOrWhiteSpace(workingDirectory))
-        {
-            var candidate = Path.Combine(workingDirectory, pathText);
-            if (seen.Add(candidate))
-            {
-                yield return candidate;
-            }
-        }
-
-    }
-
-    private static string NormalizeReferencedFileText(string reference)
-    {
-        return (reference ?? string.Empty)
-            .Trim()
-            .Trim('`', '\'', '"', '<', '>')
-            .TrimEnd('.', ',', ';');
-    }
-
-    private static string StripReferencedFilePosition(string reference, out int? line, out int? column)
-    {
-        line = null;
-        column = null;
-        reference = StripReferencedFileFragmentPosition(reference, out line, out column);
-
-        var match = Regex.Match(reference, @"^(?<path>.+?)(?::(?<line>\d+)(?::(?<column>\d+))?)$");
-        if (!match.Success)
-        {
-            return reference;
-        }
-
-        line = int.TryParse(match.Groups["line"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedLine)
-            ? parsedLine
-            : null;
-        column = int.TryParse(match.Groups["column"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedColumn)
-            ? parsedColumn
-            : null;
-        return match.Groups["path"].Value;
-    }
-
-    private IEnumerable<string> GetSolutionFileReferenceCandidates(string pathText, string? solutionDirectory)
-    {
-        ThreadHelper.ThrowIfNotOnUIThread();
-        var normalizedReference = NormalizeReferenceForComparison(pathText);
-        if (string.IsNullOrWhiteSpace(normalizedReference))
-        {
-            yield break;
-        }
-
-        foreach (var candidate in _solutionContextService.GetSolutionFilePaths()
-            .Select(path => new
-            {
-                Path = path,
-                Score = ScoreSolutionFileReference(path, normalizedReference, solutionDirectory)
-            })
-            .Where(candidate => candidate.Score >= 0)
-            .OrderBy(candidate => candidate.Score)
-            .ThenBy(candidate => candidate.Path, StringComparer.OrdinalIgnoreCase))
-        {
-            yield return candidate.Path;
-        }
-    }
-
-    private static int ScoreSolutionFileReference(string filePath, string normalizedReference, string? solutionDirectory)
-    {
-        var normalizedFullPath = NormalizeReferenceForComparison(filePath);
-        if (string.Equals(normalizedFullPath, normalizedReference, StringComparison.OrdinalIgnoreCase))
-        {
-            return 0;
-        }
-
-        if (!string.IsNullOrWhiteSpace(solutionDirectory))
-        {
-            var solutionRoot = solutionDirectory!;
-            if (filePath.StartsWith(solutionRoot, StringComparison.OrdinalIgnoreCase))
-            {
-                var relativePath = filePath.Substring(solutionRoot.Length)
-                    .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                var normalizedRelativePath = NormalizeReferenceForComparison(relativePath);
-                if (string.Equals(normalizedRelativePath, normalizedReference, StringComparison.OrdinalIgnoreCase))
-                {
-                    return 1;
-                }
-            }
-        }
-
-        var includesDirectory = normalizedReference.IndexOf('/') >= 0;
-        if (includesDirectory
-            && normalizedFullPath.EndsWith("/" + normalizedReference, StringComparison.OrdinalIgnoreCase))
-        {
-            return 20 + Math.Max(0, normalizedFullPath.Length - normalizedReference.Length);
-        }
-
-        if (!includesDirectory
-            && string.Equals(Path.GetFileName(filePath), normalizedReference, StringComparison.OrdinalIgnoreCase))
-        {
-            return 100 + filePath.Length;
-        }
-
-        return -1;
-    }
-
-    private static string StripReferencedFileFragmentPosition(string reference, out int? line, out int? column)
-    {
-        line = null;
-        column = null;
-
-        var hashIndex = reference.IndexOf('#');
-        if (hashIndex < 0)
-        {
-            return reference;
-        }
-
-        var fragment = reference.Substring(hashIndex + 1);
-        var path = reference.Substring(0, hashIndex);
-        var match = Regex.Match(fragment, @"^L?(?<line>\d+)(?:(?:C|:)(?<column>\d+))?", RegexOptions.IgnoreCase);
-        if (match.Success)
-        {
-            line = int.TryParse(match.Groups["line"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedLine)
-                ? parsedLine
-                : null;
-            column = int.TryParse(match.Groups["column"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedColumn)
-                ? parsedColumn
-                : null;
-        }
-
-        return path;
-    }
-
-    private static string DecodeReferencedFileText(string reference)
-    {
-        try
-        {
-            return Uri.UnescapeDataString(reference);
-        }
-        catch
-        {
-            return reference;
-        }
-    }
-
-    private static string NormalizeReferencedPathText(string pathText)
-    {
-        var normalized = (pathText ?? string.Empty).Trim();
-        while (normalized.StartsWith("./", StringComparison.Ordinal)
-            || normalized.StartsWith(".\\", StringComparison.Ordinal))
-        {
-            normalized = normalized.Substring(2);
-        }
-
-        return normalized;
-    }
-
-    private static string NormalizeReferenceForComparison(string pathText)
-    {
-        var normalized = NormalizeReferencedPathText(pathText)
-            .Replace('\\', '/')
-            .Trim();
-
-        while (normalized.StartsWith("/", StringComparison.Ordinal))
-        {
-            normalized = normalized.Substring(1);
-        }
-
-        return normalized;
-    }
-
-    private readonly struct ReferencedFile
-    {
-        public ReferencedFile(string path, int? line, int? column)
-        {
-            Path = path;
-            Line = line;
-            Column = column;
-        }
-
-        public string Path { get; }
-
-        public int? Line { get; }
-
-        public int? Column { get; }
+        resolved = new SolutionContextService.FileNavigationTarget(Path.GetFullPath(candidate), parsed.Line, parsed.Column);
+        return true;
     }
 
     private void RefreshIntegrations()
@@ -4122,7 +4016,15 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         var selectedHistoryPrompt = SelectedHistoryPrompt;
         if (!string.IsNullOrWhiteSpace(selectedHistoryPrompt))
         {
-            Prompt = selectedHistoryPrompt!;
+            var recovery = _composerSubmissions.TakeRecovery(selectedHistoryPrompt!, CaptureConversationStateVersion());
+            if (recovery is not null)
+            {
+                RestoreComposerSubmission(recovery);
+            }
+            else
+            {
+                Prompt = selectedHistoryPrompt!;
+            }
             ShowHistoryPanel = false;
         }
     }
@@ -4451,6 +4353,10 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
 
     private void ClearPromptHistory()
     {
+        foreach (var discarded in _composerSubmissions.ClearFailures())
+        {
+            CleanupSubmissionTempImages(discarded);
+        }
         Settings.PromptHistory.Clear();
         PromptHistory.Clear();
         SaveSettings(mergePromptHistory: false);
@@ -5174,28 +5080,17 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
     private long BeginConversationStateChange()
     {
         ClearPendingAssistantOutput();
-        return Interlocked.Increment(ref _conversationStateVersion);
+        var version = Interlocked.Increment(ref _conversationStateVersion);
+        foreach (var discarded in _composerSubmissions.Reset(version))
+        {
+            CleanupSubmissionTempImages(discarded);
+        }
+        return version;
     }
 
     private bool IsConversationStateCurrent(long version)
     {
         return CaptureConversationStateVersion() == version;
-    }
-
-    private sealed class PendingSubmission
-    {
-        public PendingSubmission(string prompt, IReadOnlyList<string> imagePaths, IReadOnlyList<string> ownedTempImagePaths)
-        {
-            Prompt = prompt ?? string.Empty;
-            ImagePaths = imagePaths ?? Array.Empty<string>();
-            OwnedTempImagePaths = ownedTempImagePaths ?? Array.Empty<string>();
-        }
-
-        public string Prompt { get; }
-
-        public IReadOnlyList<string> ImagePaths { get; }
-
-        public IReadOnlyList<string> OwnedTempImagePaths { get; }
     }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
@@ -5229,6 +5124,116 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         catch (Exception ex)
         {
             ActivityLog.TryLogError("CodexVsix", operationName + Environment.NewLine + ex);
+        }
+    }
+}
+
+internal sealed class ComposerSubmission
+{
+    public ComposerSubmission(string prompt, IReadOnlyList<string> imagePaths, IReadOnlyList<string> ownedTempImagePaths)
+    {
+        Prompt = prompt ?? string.Empty;
+        ImagePaths = (imagePaths ?? Array.Empty<string>()).ToArray();
+        OwnedTempImagePaths = (ownedTempImagePaths ?? Array.Empty<string>()).ToArray();
+    }
+
+    public string Prompt { get; }
+    public IReadOnlyList<string> ImagePaths { get; }
+    public IReadOnlyList<string> OwnedTempImagePaths { get; }
+}
+
+// The WPF composer uses this buffer directly; it has no VS or UI dependencies.
+internal sealed class ComposerSubmissionBuffer
+{
+    private readonly object _sync = new();
+    private readonly int _capacity;
+    private readonly Queue<ComposerSubmission> _pending = new();
+    private readonly List<KeyValuePair<string, ComposerSubmission>> _failures = new();
+    private long _conversationVersion;
+
+    public ComposerSubmissionBuffer(int capacity)
+    {
+        if (capacity < 1) throw new ArgumentOutOfRangeException(nameof(capacity));
+        _capacity = capacity;
+    }
+
+    public IReadOnlyList<ComposerSubmission> Reset(long conversationVersion)
+    {
+        lock (_sync)
+        {
+            var discarded = _pending.Concat(_failures.Select(entry => entry.Value)).ToArray();
+            _pending.Clear();
+            _failures.Clear();
+            _conversationVersion = conversationVersion;
+            return discarded;
+        }
+    }
+
+    public IReadOnlyList<ComposerSubmission> Enqueue(ComposerSubmission submission, long conversationVersion)
+    {
+        lock (_sync)
+        {
+            if (conversationVersion != _conversationVersion) return new[] { submission };
+            _pending.Enqueue(submission);
+            return _pending.Count > _capacity ? new[] { _pending.Dequeue() } : Array.Empty<ComposerSubmission>();
+        }
+    }
+
+    public ComposerSubmission? Dequeue(long conversationVersion)
+    {
+        lock (_sync)
+        {
+            return conversationVersion == _conversationVersion && _pending.Count > 0 ? _pending.Dequeue() : null;
+        }
+    }
+
+    public IReadOnlyList<ComposerSubmission> RememberFailure(ComposerSubmission submission, string historyEntry, long conversationVersion)
+    {
+        lock (_sync)
+        {
+            if (conversationVersion != _conversationVersion) return new[] { submission };
+            var discarded = _failures.Where(entry => string.Equals(entry.Key, historyEntry, StringComparison.Ordinal))
+                .Select(entry => entry.Value).ToList();
+            _failures.RemoveAll(entry => string.Equals(entry.Key, historyEntry, StringComparison.Ordinal));
+            _failures.Add(new KeyValuePair<string, ComposerSubmission>(historyEntry, submission));
+            if (_failures.Count > _capacity)
+            {
+                discarded.Add(_failures[0].Value);
+                _failures.RemoveAt(0);
+            }
+            return discarded;
+        }
+    }
+
+    public ComposerSubmission? TakeRecovery(string historyEntry, long conversationVersion)
+    {
+        lock (_sync)
+        {
+            if (conversationVersion != _conversationVersion) return null;
+            var index = _failures.FindIndex(entry => string.Equals(entry.Key, historyEntry, StringComparison.Ordinal));
+            if (index < 0) return null;
+            var recovery = _failures[index].Value;
+            _failures.RemoveAt(index);
+            return recovery;
+        }
+    }
+
+    public IReadOnlyList<ComposerSubmission> ClearFailures()
+    {
+        lock (_sync)
+        {
+            var discarded = _failures.Select(entry => entry.Value).ToArray();
+            _failures.Clear();
+            return discarded;
+        }
+    }
+
+    public bool RetainsImage(string path)
+    {
+        lock (_sync)
+        {
+            return _pending.Concat(_failures.Select(entry => entry.Value))
+                .Any(submission => submission.ImagePaths.Contains(path, StringComparer.OrdinalIgnoreCase));
         }
     }
 }

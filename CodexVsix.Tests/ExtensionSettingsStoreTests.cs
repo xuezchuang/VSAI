@@ -90,6 +90,66 @@ public sealed class ExtensionSettingsStoreTests
     }
 
     [Fact]
+    public void SaveKeepsReusedPromptRecentWhenHistoryIsFull()
+    {
+        using var temp = new TemporaryDirectory();
+        var file = Path.Combine(temp.Path, "settings.json");
+        var store = new ExtensionSettingsStore(file);
+        store.Save(new CodexExtensionSettings
+        {
+            PromptHistory = Enumerable.Range(0, 50).Select(index => "prompt-" + index).ToList()
+        });
+        var settings = store.Load();
+        settings.PromptHistory.Remove("prompt-0");
+        settings.PromptHistory.Add("prompt-0");
+        settings.PromptHistory.RemoveAt(0);
+        settings.PromptHistory.Add("new-prompt");
+
+        store.Save(settings);
+
+        var history = store.Load().PromptHistory;
+        Assert.Equal(50, history.Count);
+        Assert.Equal(new[] { "prompt-0", "new-prompt" }, history.Skip(48));
+        Assert.DoesNotContain("prompt-1", history);
+    }
+
+    [Theory]
+    [InlineData("not-base64", true)]
+    [InlineData("not-base64", false)]
+    [InlineData("YWJj", true)]
+    [InlineData("YWJj", false)]
+    public void SaveCannotOverwriteSettingsWhoseProtectedPayloadCannotBeRead(string payload, bool mergePromptHistory)
+    {
+        using var temp = new TemporaryDirectory();
+        var file = Path.Combine(temp.Path, "settings.json");
+        var original = "{\"DefaultModel\":\"saved-model\",\"ProtectedSensitiveSettings\":\"" + payload + "\"}";
+        File.WriteAllText(file, original);
+        var store = new ExtensionSettingsStore(file);
+        var fallback = store.Load();
+        Assert.False(string.IsNullOrWhiteSpace(store.LastLoadError));
+
+        Assert.Throws<InvalidDataException>(() => store.Save(fallback, mergePromptHistory));
+
+        Assert.Equal(original, File.ReadAllText(file));
+        Assert.Empty(Directory.EnumerateFiles(temp.Path, "*.tmp"));
+        Assert.False(File.Exists(Path.Combine(temp.Path, "settings.bak.json")));
+    }
+
+    [Fact]
+    public void SaveCanReplaceMalformedJsonAndKeepsOriginalBackup()
+    {
+        using var temp = new TemporaryDirectory();
+        var file = Path.Combine(temp.Path, "settings.json");
+        File.WriteAllText(file, "{not-json");
+        var store = new ExtensionSettingsStore(file);
+
+        store.Save(new CodexExtensionSettings { DefaultModel = "recovered-model" });
+
+        Assert.Equal("recovered-model", store.Load().DefaultModel);
+        Assert.Equal("{not-json", File.ReadAllText(Path.Combine(temp.Path, "settings.bak.json")));
+    }
+
+    [Fact]
     public void LegacyPlaintextSensitiveSettingsLoadAndMigrateOnSave()
     {
         using var temp = new TemporaryDirectory();

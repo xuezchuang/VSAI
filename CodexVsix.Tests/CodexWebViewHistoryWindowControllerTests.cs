@@ -80,6 +80,67 @@ public sealed class CodexWebViewHistoryWindowControllerTests
         Assert.Equal(5, controller.GetStatus("thread-1")?.LoadedTurns);
     }
 
+    [Fact]
+    public async Task LoadOlderGrantsANewBatchEvenWhenOnePageOvershootsTheByteBudget()
+    {
+        using var controller = new CodexWebViewHistoryWindowController(_ => { });
+        var parameters = new JObject { ["threadId"] = "large-page", ["cursor"] = "older" };
+        var page = BuildPage(0, 20, "older");
+        foreach (var turn in (JArray)page["data"]!)
+        {
+            var items = (JArray)turn["items"]!;
+            for (var index = 0; index < 3; index++)
+            {
+                items.Add(new JObject
+                {
+                    ["type"] = "agentMessage",
+                    ["text"] = new string('x', CodexWebViewPayloadLimiter.MaxMessageTextLength)
+                });
+            }
+        }
+        controller.ObserveResponse("thread/turns/list", parameters, page);
+        var waiting = controller.WaitForCapacityAsync("thread/turns/list", parameters, CancellationToken.None);
+        Assert.False(waiting.IsCompleted);
+
+        Assert.True(controller.LoadOlder("large-page"));
+        await waiting;
+
+        // The released request must have room to fetch data, rather than asking
+        // the user to click repeatedly just to catch up with an oversized page.
+        Assert.True(controller.WaitForCapacityAsync("thread/turns/list", parameters, CancellationToken.None).IsCompleted);
+        Assert.False(controller.GetStatus("large-page")!.CanLoadMore);
+        Assert.False(controller.LoadOlder("large-page"));
+    }
+
+    [Fact]
+    public async Task ARequestForAnotherThreadCannotReleaseTheWaitingThread()
+    {
+        using var controller = new CodexWebViewHistoryWindowController(_ => { });
+        var parameters = new JObject { ["threadId"] = "waiting-thread", ["cursor"] = "older" };
+        controller.ObserveResponse("thread/turns/list", parameters,
+            BuildPage(0, CodexWebViewHistoryWindowController.InitialTurnBudget, "older"));
+        var waiting = controller.WaitForCapacityAsync("thread/turns/list", parameters, CancellationToken.None);
+
+        Assert.False(controller.LoadOlder("different-thread"));
+        Assert.False(waiting.IsCompleted);
+        Assert.True(controller.GetStatus("waiting-thread")!.CanLoadMore);
+
+        Assert.True(controller.LoadOlder("waiting-thread"));
+        await waiting;
+    }
+
+    [Fact]
+    public void ExhaustedHistoryCannotEnterAFalseLoadingState()
+    {
+        using var controller = new CodexWebViewHistoryWindowController(_ => { });
+        controller.ObserveResponse("thread/turns/list", new JObject { ["threadId"] = "finished" },
+            BuildPage(0, 1, null));
+
+        Assert.False(controller.LoadOlder("finished"));
+        Assert.False(controller.GetStatus("finished")!.IsLoading);
+        Assert.False(controller.GetStatus("finished")!.IsVisible);
+    }
+
     private static JObject BuildPage(int start, int count, string? nextCursor)
     {
         var turns = new JArray();

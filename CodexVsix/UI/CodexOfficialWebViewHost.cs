@@ -973,10 +973,7 @@ internal sealed class CodexOfficialWebViewHost : Grid, IDisposable
 
     private string ResolveWorkingDirectory()
     {
-        var path = _viewModel.Settings.WorkingDirectory;
-        return !string.IsNullOrWhiteSpace(path) && Directory.Exists(path)
-            ? Path.GetFullPath(path)
-            : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return CodexWorkingDirectory.Resolve(_viewModel.Settings);
     }
 
     private string ResolveLocale()

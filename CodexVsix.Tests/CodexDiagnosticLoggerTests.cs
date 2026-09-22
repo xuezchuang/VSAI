@@ -32,6 +32,7 @@ public sealed class CodexDiagnosticLoggerTests
             new JObject
             {
                 ["authorization"] = "Bearer top-secret-token",
+                ["message"] = "request failed: Bearer another-secret-token",
                 ["key"] = "sk-abcdefghijklmnopqrstuvwxyz",
                 ["assignment"] = "OPENAI_API_KEY=plain-secret-value"
             });
@@ -42,8 +43,56 @@ public sealed class CodexDiagnosticLoggerTests
         Assert.Contains("Bearer [redacted]", text, StringComparison.Ordinal);
         Assert.Contains("[redacted-secret]", text, StringComparison.Ordinal);
         Assert.DoesNotContain("top-secret-token", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("another-secret-token", text, StringComparison.Ordinal);
         Assert.DoesNotContain("sk-abcdefghijklmnopqrstuvwxyz", text, StringComparison.Ordinal);
         Assert.DoesNotContain("plain-secret-value", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("{\"api_key\":\"plain-secret-value\"}")]
+    [InlineData("password=\"plain-secret-value with spaces\"")]
+    [InlineData("client_secret='plain-secret-value with spaces'")]
+    [InlineData("{\"refreshToken\":\"plain-secret-value\"}")]
+    [InlineData("{\"password\":\"escaped \\\"plain-secret-value\\\" text\"}")]
+    public void DiagnosticMessagesRedactQuotedAssignments(string message)
+    {
+        using var temp = new TemporaryDirectory();
+        var logger = new CodexDiagnosticLogger(Path.Combine(temp.Path, "logs"));
+        logger.SetEnabled(true, writeTransition: false);
+
+        logger.Write("appserver.stderr", new JObject { ["message"] = message });
+
+        var text = File.ReadAllText(logger.LogFilePath);
+        Assert.DoesNotContain("plain-secret-value", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("with spaces", text, StringComparison.Ordinal);
+        Assert.Contains("[redacted]", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DiagnosticDetailsRedactSensitivePropertiesAtEveryDepthWithoutMutatingInput()
+    {
+        using var temp = new TemporaryDirectory();
+        var logger = new CodexDiagnosticLogger(Path.Combine(temp.Path, "logs"));
+        logger.SetEnabled(true, writeTransition: false);
+        var details = new JObject
+        {
+            ["apiKey"] = "plain-key-value",
+            ["nested"] = new JArray(new JObject
+            {
+                ["PASSWORD"] = new JArray("first-secret", "second-secret"),
+                ["status"] = "failed"
+            })
+        };
+
+        logger.Write("renderer.test", details);
+
+        var text = File.ReadAllText(logger.LogFilePath);
+        Assert.DoesNotContain("plain-key-value", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("first-secret", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("second-secret", text, StringComparison.Ordinal);
+        Assert.Contains("failed", text, StringComparison.Ordinal);
+        Assert.Equal("plain-key-value", details["apiKey"]?.Value<string>());
+        Assert.Equal("first-secret", details["nested"]?[0]?["PASSWORD"]?[0]?.Value<string>());
     }
 
     [Fact]

@@ -56,6 +56,8 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
     private readonly bool _isSettingsSurface;
     private readonly Action<string>? _routeChanged;
     private bool _disposed;
+    private string _workspaceDirectory;
+    private readonly CodexWorkspaceRequestRebaser _workspaceRequests = new();
 
     public CodexOfficialWebViewBridge(
         CodexToolWindowViewModel viewModel,
@@ -72,6 +74,8 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         _broadcastQueryInvalidation = broadcastQueryInvalidation;
         _isSettingsSurface = isSettingsSurface;
         _routeChanged = routeChanged;
+        _workspaceDirectory = ResolveWorkingDirectory();
+        _viewModel.WorkingDirectoryChanged += OnWorkingDirectoryChanged;
         _appServerRequestRelay = new CodexAppServerRequestRelay(Post);
         _appServerRequestForwarder = _appServerRequestRelay.ForwardAsync;
         _historyWindowController = new CodexWebViewHistoryWindowController(PostHistoryWindowStatus);
@@ -352,6 +356,35 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         {
             ["type"] = "history-window-state",
             ["isVisible"] = false
+        });
+    }
+
+    private void OnWorkingDirectoryChanged(object? sender, EventArgs e)
+    {
+        // The frozen composer can retain an IDE prefill or a prewarmed thread from
+        // the old folder. Only new, unused conversations may follow this selection.
+        _sharedObjects.TryGetValue("composer_prefill", out var prefill);
+        var selectedDirectory = ResolveWorkingDirectory();
+        _workspaceRequests.ChangeDirectory(
+            _workspaceDirectory, selectedDirectory, (prefill as JObject)?["cwd"]?.Value<string>());
+        _workspaceDirectory = selectedDirectory;
+        Post(new JObject { ["type"] = "active-workspace-roots-updated" });
+        if (_isSettingsSurface)
+        {
+            return;
+        }
+
+        HideHistoryWindow();
+        _routeChanged?.Invoke("/");
+        Post(new JObject
+        {
+            ["type"] = "navigate-to-route",
+            ["path"] = "/",
+            ["state"] = new JObject
+            {
+                ["prefillCwd"] = _workspaceDirectory,
+                ["focusComposerNonce"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            }
         });
     }
 
@@ -997,16 +1030,8 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
             parameters["approvalPolicy"] = permissions["approvalPolicy"]!.DeepClone();
         }
 
-        var enrichedParameters = CodexRuntimeIdentityContext.EnrichRequest(
-            "thread/start",
-            parameters,
-            _viewModel.Settings.DefaultModel,
-            _viewModel.Settings.ReasoningEffort);
-        var result = await _processService.InvokeAppServerRequestAsync(
-            _viewModel.Settings,
-            "thread/start",
-            enrichedParameters,
-            cancellationToken).ConfigureAwait(false);
+        var result = await InvokeAppServerForWebViewAsync(
+            "thread/start", parameters, cancellationToken).ConfigureAwait(false);
         return result?["thread"]?["id"]?.Value<string>()
             ?? "thread-" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture);
     }
@@ -1031,9 +1056,10 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         JToken? parameters,
         CancellationToken cancellationToken)
     {
+        var preparedParameters = _workspaceRequests.PrepareRequest(method, parameters, ResolveWorkingDirectory());
         var enrichedParameters = CodexRuntimeIdentityContext.EnrichRequest(
             method,
-            parameters,
+            preparedParameters,
             _viewModel.Settings.DefaultModel,
             _viewModel.Settings.ReasoningEffort);
         await _historyWindowController.WaitForCapacityAsync(method, enrichedParameters, cancellationToken).ConfigureAwait(false);
@@ -1044,6 +1070,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
                 method,
                 enrichedParameters,
                 cancellationToken).ConfigureAwait(false);
+            _workspaceRequests.ObserveResponse(method, parameters, preparedParameters, result);
             var limitedResult = _payloadLimiter.LimitAppServerResult(method, result);
             _historyWindowController.ObserveResponse(method, enrichedParameters, limitedResult);
             return limitedResult;
@@ -1352,10 +1379,31 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
 
     private JObject PathsExist(JObject values)
     {
+        return PathsExist(values, ResolveWorkingDirectory());
+    }
+
+    internal static JObject PathsExist(JObject values, string workingDirectory)
+    {
         var paths = values["paths"] as JArray ?? new JArray();
         return new JObject
         {
-            ["existingPaths"] = new JArray(paths.Values<string>().Where(path => !string.IsNullOrWhiteSpace(path) && (File.Exists(path) || Directory.Exists(path))))
+            ["existingPaths"] = new JArray(paths.Values<string>().Where(path =>
+            {
+                if (string.IsNullOrWhiteSpace(path))
+                {
+                    return false;
+                }
+
+                try
+                {
+                    var resolved = ResolveFilePath(new JObject { ["path"] = path, ["cwd"] = values["cwd"]?.DeepClone() }, workingDirectory);
+                    return File.Exists(resolved) || Directory.Exists(resolved);
+                }
+                catch (Exception ex) when (ex is ArgumentException || ex is NotSupportedException || ex is PathTooLongException)
+                {
+                    return false;
+                }
+            }))
         };
     }
 
@@ -1382,11 +1430,11 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
     private async Task<JObject> BuildWorkspaceRootsAsync()
     {
         await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-        var root = _solutionContextService.TryGetSolutionDirectory() ?? ResolveWorkingDirectory();
+        var root = ResolveWorkingDirectory();
         return new JObject
         {
             ["roots"] = new JArray(root),
-            ["labels"] = new JObject { [root] = Path.GetFileName(root.TrimEnd(Path.DirectorySeparatorChar)) }
+            ["labels"] = new JObject { [root] = root }
         };
     }
 
@@ -1394,7 +1442,6 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
     {
         await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
         var workspaceRoot = values["workspaceRoot"]?.Value<string>()
-            ?? _solutionContextService.TryGetSolutionDirectory()
             ?? ResolveWorkingDirectory();
         var activeFile = _solutionContextService.GetActiveDocumentPath();
         var activeSelection = _solutionContextService.GetActiveSelectionSnippetForPrompt();
@@ -1417,25 +1464,65 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         Post(new JObject
         {
             ["type"] = "add-context-file",
-            ["file"] = ToPickedFile(path!)
+            ["file"] = ToPickedFile(ResolveFilePath(values))
         });
         return new JObject { ["success"] = true };
     }
 
     private async Task<JObject> OpenFileAsync(JObject values)
     {
-        var path = values["path"]?.Value<string>() ?? values["uri"]?.Value<string>();
-        if (string.IsNullOrWhiteSpace(path))
+        if (!TryResolveOpenFileRequest(values, ResolveWorkingDirectory(), out var target))
         {
             return new JObject { ["success"] = false };
         }
 
         await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-        _solutionContextService.OpenFileInVisualStudio(
-            ResolveFilePath(path!),
-            values["line"]?.Value<int?>(),
-            values["column"]?.Value<int?>());
-        return new JObject { ["success"] = true };
+        return new JObject
+        {
+            ["success"] = _solutionContextService.OpenFileInVisualStudio(target.Path, target.Line, target.Column)
+        };
+    }
+
+    internal static bool TryResolveOpenFileRequest(JObject values, string workingDirectory,
+        out SolutionContextService.FileNavigationTarget target)
+    {
+        target = default;
+        var reference = values["path"]?.Type == JTokenType.String ? values["path"]!.Value<string>() : null;
+        if (string.IsNullOrWhiteSpace(reference))
+        {
+            reference = values["uri"]?.Type == JTokenType.String ? values["uri"]!.Value<string>() : null;
+        }
+
+        var cwd = values["cwd"]?.Type == JTokenType.String ? values["cwd"]!.Value<string>() : null;
+        if (!SolutionContextService.TryResolveFileReference(reference,
+            string.IsNullOrWhiteSpace(cwd) ? workingDirectory : cwd, out var parsed)
+            || !TryReadNavigationCoordinate(values["line"], parsed.Line, out var line)
+            || !TryReadNavigationCoordinate(values["column"], parsed.Column, out var column))
+        {
+            return false;
+        }
+
+        target = new SolutionContextService.FileNavigationTarget(parsed.Path, line, column);
+        return true;
+    }
+
+    private static bool TryReadNavigationCoordinate(JToken? token, int? fallback, out int? coordinate)
+    {
+        coordinate = fallback;
+        if (token is null || token.Type == JTokenType.Null)
+        {
+            return true;
+        }
+
+        if ((token.Type != JTokenType.Integer && token.Type != JTokenType.String)
+            || !int.TryParse(token.ToString(), NumberStyles.None, CultureInfo.InvariantCulture, out var parsed)
+            || parsed < 1)
+        {
+            return false;
+        }
+
+        coordinate = parsed;
+        return true;
     }
 
     private async Task HandleOfficialCommandAsync(JObject message)
@@ -1763,6 +1850,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         }
 
         _autoCompactionCoordinator.ObserveNotification(method, parameters);
+        parameters = _appServerRequestRelay.TransformNotificationParameters(method, parameters);
         if (!_payloadLimiter.TryLimitNotification(method, parameters, out var limitedParameters))
         {
             return;
@@ -1953,10 +2041,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
 
     private string ResolveWorkingDirectory()
     {
-        var path = _viewModel.Settings.WorkingDirectory;
-        return !string.IsNullOrWhiteSpace(path) && Directory.Exists(path)
-            ? Path.GetFullPath(path)
-            : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return CodexWorkingDirectory.Resolve(_viewModel.Settings);
     }
 
     private string GetLocale()
@@ -2047,7 +2132,12 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         };
     }
 
-    private static string ResolveFilePath(JObject values)
+    private string ResolveFilePath(JObject values)
+    {
+        return ResolveFilePath(values, ResolveWorkingDirectory());
+    }
+
+    internal static string ResolveFilePath(JObject values, string workingDirectory)
     {
         var path = values["uri"]?.Value<string>() ?? values["path"]?.Value<string>();
         if (string.IsNullOrWhiteSpace(path))
@@ -2055,17 +2145,21 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
             throw new InvalidOperationException("A file path is required.");
         }
 
-        return ResolveFilePath(path!);
+        var cwd = values["cwd"]?.Value<string>();
+        return ResolveFilePath(path!, string.IsNullOrWhiteSpace(cwd) ? workingDirectory : cwd);
     }
 
-    private static string ResolveFilePath(string path)
+    private static string ResolveFilePath(string path, string? workingDirectory = null)
     {
-        if (Uri.TryCreate(path, UriKind.Absolute, out var uri) && uri.IsFile)
+        if (path.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
+            && Uri.TryCreate(path, UriKind.Absolute, out var uri) && uri.IsFile)
         {
             return uri.LocalPath;
         }
 
-        return Path.GetFullPath(path);
+        return Path.GetFullPath(!Path.IsPathRooted(path) && !string.IsNullOrWhiteSpace(workingDirectory)
+            ? Path.Combine(workingDirectory!, path)
+            : path);
     }
 
     private static JObject ToPickedFile(string path)
@@ -2242,5 +2336,6 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         _autoCompactionCoordinator.Dispose();
         _appServerRequestRelay.Dispose();
         _processService.AppServerNotificationReceived -= OnAppServerNotificationReceived;
+        _viewModel.WorkingDirectoryChanged -= OnWorkingDirectoryChanged;
     }
 }

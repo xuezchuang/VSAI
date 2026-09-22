@@ -60,6 +60,10 @@ public sealed class LocalizationService
         ["SettingsTitle"] = "Configuration and details",
         ["ExecutableLabel"] = "Executable",
         ["WorkingDirectoryLabel"] = "Working directory",
+        ["NewChatFolderLabel"] = "New chat folder",
+        ["ChooseWorkingDirectoryLabel"] = "Choose folder…",
+        ["UseSolutionDirectoryLabel"] = "Use solution directory",
+        ["ChangeWorkingDirectoryHint"] = "Changing the folder opens a new chat. Existing chats keep their original folder.",
         ["CodexConfigLabel"] = "Codex config",
         ["CodexSkillsLabel"] = "Skills folder",
         ["ManagedMcpTitle"] = "Managed MCP servers",
@@ -1784,6 +1788,10 @@ public sealed class LocalizationService
     public string SettingsTitle => Get("SettingsTitle");
     public string ExecutableLabel => Get("ExecutableLabel");
     public string WorkingDirectoryLabel => Get("WorkingDirectoryLabel");
+    public string NewChatFolderLabel => Get("NewChatFolderLabel");
+    public string ChooseWorkingDirectoryLabel => Get("ChooseWorkingDirectoryLabel");
+    public string UseSolutionDirectoryLabel => Get("UseSolutionDirectoryLabel");
+    public string ChangeWorkingDirectoryHint => Get("ChangeWorkingDirectoryHint");
     public string CodexConfigLabel => GetLocalizedString("CodexConfigLabel", "Configuração do Codex");
     public string CodexSkillsLabel => GetLocalizedString("CodexSkillsLabel", "Pasta de skills");
     public string ManagedMcpTitle => GetLocalizedString("ManagedMcpTitle", "MCPs gerenciados");

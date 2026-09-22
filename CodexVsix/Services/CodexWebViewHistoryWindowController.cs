@@ -122,13 +122,15 @@ internal sealed class CodexWebViewHistoryWindowController : IDisposable
         CodexWebViewHistoryWindowStatus? status;
         lock (_syncRoot)
         {
-            if (_disposed || !TryGetState(threadId, out var state))
+            if (_disposed || !TryGetState(threadId, out var state) || !state.HasMore || state.IsLoading)
             {
                 return false;
             }
 
-            state.AllowedTurns += AdditionalTurnBudget;
-            state.AllowedBytes += AdditionalByteBudget;
+            // A single server page can exceed the previous budget. Each click
+            // must grant a new batch from what has actually been loaded.
+            state.AllowedTurns = Math.Max(state.AllowedTurns, state.LoadedTurns) + AdditionalTurnBudget;
+            state.AllowedBytes = Math.Max(state.AllowedBytes, state.LoadedBytes) + AdditionalByteBudget;
             state.IsWaitingForUser = false;
             state.IsLoading = state.HasMore;
             gate = state.PendingPageGate;
@@ -250,9 +252,9 @@ internal sealed class CodexWebViewHistoryWindowController : IDisposable
 
     private bool TryGetState(string? threadId, out ThreadWindowState state)
     {
-        if (!string.IsNullOrWhiteSpace(threadId) && _states.TryGetValue(threadId!, out state!))
+        if (!string.IsNullOrWhiteSpace(threadId))
         {
-            return true;
+            return _states.TryGetValue(threadId!, out state!);
         }
 
         foreach (var candidate in _states.Values)

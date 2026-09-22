@@ -93,9 +93,20 @@ public sealed class ExtensionSettingsStore
 
         try
         {
-            if (mergePromptHistory)
+            CodexExtensionSettings? existing = null;
+            try
             {
-                MergePromptHistoryFromDisk(settings);
+                existing = LoadWithoutLock();
+            }
+            catch (JsonException)
+            {
+                // A malformed JSON file can be replaced after Save has a valid payload.
+                // Decryption and IO failures must propagate, preserving the existing settings.
+            }
+
+            if (mergePromptHistory && existing is not null)
+            {
+                MergePromptHistory(settings, existing);
             }
 
             var json = SerializeForStorage(settings);
@@ -171,27 +182,16 @@ public sealed class ExtensionSettingsStore
         }
     }
 
-    private void MergePromptHistoryFromDisk(CodexExtensionSettings settings)
+    private static void MergePromptHistory(CodexExtensionSettings settings, CodexExtensionSettings existing)
     {
-        if (!File.Exists(_settingsFile))
-        {
-            return;
-        }
-
-        try
-        {
-            var existing = LoadWithoutLock();
-            settings.PromptHistory = (existing.PromptHistory ?? new List<string>())
-                .Concat(settings.PromptHistory ?? new List<string>())
-                .Where(item => !string.IsNullOrWhiteSpace(item))
-                .Distinct(StringComparer.Ordinal)
-                .TakeLastCompat(50)
-                .ToList();
-        }
-        catch
-        {
-            // A malformed existing file is replaced only after Save has a valid payload.
-        }
+        settings.PromptHistory = (existing.PromptHistory ?? new List<string>())
+            .Concat(settings.PromptHistory ?? new List<string>())
+            .Where(item => !string.IsNullOrWhiteSpace(item))
+            .Reverse()
+            .Distinct(StringComparer.Ordinal)
+            .Take(50)
+            .Reverse()
+            .ToList();
     }
 
     private void WriteAtomically(string json)

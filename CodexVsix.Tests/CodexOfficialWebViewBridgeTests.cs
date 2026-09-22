@@ -296,6 +296,165 @@ public sealed class CodexOfficialWebViewBridgeTests
         Assert.Empty(Assert.IsType<JArray>(ideContext["openTabs"]));
     }
 
+    [Fact]
+    public void OpenFileUsesTheRequestWorkspaceWhenNamesCollideWithTheConfiguredWorkspace()
+    {
+        using var temp = new TemporaryDirectory();
+        var configured = Path.Combine(temp.Path, "configured");
+        var requested = Path.Combine(temp.Path, "requested");
+        Directory.CreateDirectory(configured);
+        Directory.CreateDirectory(requested);
+        File.WriteAllText(Path.Combine(configured, "file.cpp"), "wrong workspace");
+        var expected = Path.Combine(requested, "file.cpp");
+        File.WriteAllText(expected, "requested workspace");
+
+        Assert.True(CodexOfficialWebViewBridge.TryResolveOpenFileRequest(new JObject
+        {
+            ["path"] = "file.cpp:19:4", ["cwd"] = requested
+        }, configured, out var target));
+        Assert.Equal(expected, target.Path);
+        Assert.Equal(19, target.Line);
+        Assert.Equal(4, target.Column);
+
+        Assert.True(CodexOfficialWebViewBridge.TryResolveOpenFileRequest(new JObject
+        {
+            ["path"] = "file.cpp", ["line"] = 7
+        }, configured, out var fallback));
+        Assert.Equal(Path.Combine(configured, "file.cpp"), fallback.Path);
+        Assert.Equal(7, fallback.Line);
+    }
+
+    [Fact]
+    public void OpenFilePreservesUriCoordinatesAndAllowsExplicitCoordinatesToOverrideThem()
+    {
+        using var temp = new TemporaryDirectory();
+        var path = Path.Combine(temp.Path, "中文 %20#文件.cpp");
+        File.WriteAllText(path, "source");
+        var values = new JObject { ["uri"] = new Uri("file:///" + path.Replace('\\', '/').Replace("%", "%25").Replace("#", "%23")).AbsoluteUri + "#L21C5" };
+
+        Assert.True(CodexOfficialWebViewBridge.TryResolveOpenFileRequest(values, temp.Path, out var fromUri));
+        Assert.Equal(path, fromUri.Path);
+        Assert.Equal(21, fromUri.Line);
+        Assert.Equal(5, fromUri.Column);
+        values["line"] = 3;
+        values["column"] = 2;
+        Assert.True(CodexOfficialWebViewBridge.TryResolveOpenFileRequest(values, temp.Path, out var explicitPosition));
+        Assert.Equal(3, explicitPosition.Line);
+        Assert.Equal(2, explicitPosition.Column);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("2147483648")]
+    [InlineData("\"invalid\"")]
+    [InlineData("1.5")]
+    [InlineData("{}")]
+    public void OpenFileRejectsInvalidCoordinatesWithoutThrowing(string coordinateJson)
+    {
+        using var temp = new TemporaryDirectory();
+        var path = Path.Combine(temp.Path, "file.cpp");
+        File.WriteAllText(path, "source");
+        var coordinate = JToken.Parse(coordinateJson);
+        Assert.False(CodexOfficialWebViewBridge.TryResolveOpenFileRequest(new JObject
+        {
+            ["path"] = path, ["line"] = coordinate
+        }, temp.Path, out _));
+        Assert.False(CodexOfficialWebViewBridge.TryResolveOpenFileRequest(new JObject
+        {
+            ["path"] = path, ["line"] = 1, ["column"] = coordinate
+        }, temp.Path, out _));
+    }
+
+    [Fact]
+    public void OpenFileDoesNotReportResolvableTargetsForMissingFilesOrExternalUrls()
+    {
+        using var temp = new TemporaryDirectory();
+        Assert.False(CodexOfficialWebViewBridge.TryResolveOpenFileRequest(new JObject
+        {
+            ["path"] = "missing.cpp"
+        }, temp.Path, out _));
+        Assert.False(CodexOfficialWebViewBridge.TryResolveOpenFileRequest(new JObject
+        {
+            ["path"] = "https://example.test/file.cpp"
+        }, temp.Path, out _));
+    }
+
+    [Fact]
+    public void FileReadsUseTheRequestedWorkspaceAndFallBackToTheConfiguredWorkspace()
+    {
+        using var temp = new TemporaryDirectory();
+        var configured = Path.Combine(temp.Path, "configured");
+        var requested = Path.Combine(temp.Path, "requested");
+        Directory.CreateDirectory(configured);
+        Directory.CreateDirectory(requested);
+        File.WriteAllText(Path.Combine(configured, "file.txt"), "configured contents");
+        File.WriteAllText(Path.Combine(requested, "file.txt"), "requested contents");
+        var values = new JObject { ["path"] = "file.txt", ["cwd"] = requested };
+
+        Assert.Equal("requested contents", File.ReadAllText(
+            CodexOfficialWebViewBridge.ResolveFilePath(values, configured)));
+        values["cwd"] = " ";
+        Assert.Equal("configured contents", File.ReadAllText(
+            CodexOfficialWebViewBridge.ResolveFilePath(values, configured)));
+        Assert.Equal("file.txt", values["path"]?.Value<string>());
+    }
+
+    [Fact]
+    public void FileReadsPreserveLiteralPercentNamesAndDecodeFileUrisOnlyOnce()
+    {
+        using var temp = new TemporaryDirectory();
+        var path = Path.Combine(temp.Path, "中文 %20#file.bin");
+        var bytes = new byte[] { 0, 1, 254, 255 };
+        File.WriteAllBytes(path, bytes);
+        var plain = CodexOfficialWebViewBridge.ResolveFilePath(
+            new JObject { ["path"] = Path.GetFileName(path) }, temp.Path);
+        var absolutePlain = CodexOfficialWebViewBridge.ResolveFilePath(
+            new JObject { ["path"] = path }, Path.Combine(temp.Path, "other"));
+        var uri = "file:///" + path.Replace('\\', '/').Replace("%", "%25").Replace("#", "%23");
+        var fromUri = CodexOfficialWebViewBridge.ResolveFilePath(
+            new JObject { ["uri"] = uri, ["cwd"] = Path.Combine(temp.Path, "other") }, temp.Path);
+
+        Assert.Equal(path, plain);
+        Assert.Equal(path, absolutePlain);
+        Assert.Equal(bytes, File.ReadAllBytes(absolutePlain));
+        Assert.Equal(path, fromUri);
+        Assert.Equal(bytes, File.ReadAllBytes(fromUri));
+    }
+
+    [Fact]
+    public void FileResolutionLeavesMissingFileErrorsToTheReadOperation()
+    {
+        using var temp = new TemporaryDirectory();
+        var resolved = CodexOfficialWebViewBridge.ResolveFilePath(
+            new JObject { ["path"] = "missing.txt" }, temp.Path);
+
+        Assert.Equal(Path.Combine(temp.Path, "missing.txt"), resolved);
+        Assert.Throws<FileNotFoundException>(() => File.ReadAllBytes(resolved));
+    }
+
+    [Fact]
+    public void PathsExistChecksTheRequestWorkspaceAndReturnsTheOriginalReferences()
+    {
+        using var temp = new TemporaryDirectory();
+        var requested = Path.Combine(temp.Path, "requested");
+        Directory.CreateDirectory(requested);
+        File.WriteAllText(Path.Combine(requested, "included.txt"), "included");
+        Directory.CreateDirectory(Path.Combine(requested, "folder"));
+        File.WriteAllText(Path.Combine(temp.Path, "wrong-workspace.txt"), "must not match");
+        var values = new JObject
+        {
+            ["cwd"] = requested,
+            ["paths"] = new JArray("included.txt", "folder", "wrong-workspace.txt", "missing.txt", "bad\0path")
+        };
+
+        var result = CodexOfficialWebViewBridge.PathsExist(values, temp.Path);
+
+        Assert.Equal(new[] { "included.txt", "folder" },
+            Assert.IsType<JArray>(result["existingPaths"]).Values<string>());
+        Assert.Equal(5, ((JArray)values["paths"]!).Count);
+    }
+
     private static string FindRepositoryFile(params string[] parts)
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

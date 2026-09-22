@@ -16,7 +16,6 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Shapes;
 using System.Windows.Threading;
-using File = System.IO.File;
 using IOPath = System.IO.Path;
 
 namespace CodexVsix.UI;
@@ -543,46 +542,29 @@ internal static class MarkdownRenderer
 
     private static bool TryResolveWorkspaceFileReference(string reference, out string target)
     {
+        return TryResolveWorkspaceFileReference(reference, CurrentOptions.WorkspaceRoot, out target);
+    }
+
+    internal static bool TryResolveWorkspaceFileReference(string reference, string workspaceRoot, out string target)
+    {
         target = string.Empty;
-        var normalizedReference = TrimFileReferenceDisplay(reference);
-        if (string.IsNullOrWhiteSpace(normalizedReference) || IsExternalUri(normalizedReference))
+        if (!SolutionContextService.TryResolveFileReference(reference, workspaceRoot, out var resolved)
+            || !IsPathInsideWorkspace(resolved.Path, workspaceRoot))
         {
             return false;
         }
 
-        var pathPart = StripFilePosition(normalizedReference, out var position);
-        if (string.IsNullOrWhiteSpace(pathPart))
+        target = resolved.Path;
+        if (resolved.Line.HasValue)
         {
-            return false;
-        }
-
-        var workspaceRoot = CurrentOptions.WorkspaceRoot;
-        var candidate = pathPart;
-        if (!IOPath.IsPathRooted(candidate))
-        {
-            if (string.IsNullOrWhiteSpace(workspaceRoot))
+            target += ":" + resolved.Line.Value.ToString(CultureInfo.InvariantCulture);
+            if (resolved.Column.HasValue)
             {
-                return false;
+                target += ":" + resolved.Column.Value.ToString(CultureInfo.InvariantCulture);
             }
-
-            candidate = IOPath.Combine(workspaceRoot, candidate);
         }
 
-        try
-        {
-            var fullPath = IOPath.GetFullPath(candidate);
-            if (!File.Exists(fullPath) || !IsPathInsideWorkspace(fullPath, workspaceRoot))
-            {
-                return false;
-            }
-
-            target = fullPath + position;
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
+        return true;
     }
 
     private static bool IsPathInsideWorkspace(string fullPath, string workspaceRoot)
@@ -605,25 +587,6 @@ internal static class MarkdownRenderer
         }
     }
 
-    private static string StripFilePosition(string value, out string position)
-    {
-        position = string.Empty;
-        var match = Regex.Match(value, @"^(?<path>.+?)(?<position>:(?<line>\d+)(?::(?<column>\d+))?)$");
-        if (!match.Success)
-        {
-            return value;
-        }
-
-        var path = match.Groups["path"].Value;
-        if (IOPath.IsPathRooted(value) && Regex.IsMatch(value, @"^[A-Za-z]:[\\/][^:]+$"))
-        {
-            return value;
-        }
-
-        position = match.Groups["position"].Value;
-        return path;
-    }
-
     private static string TrimFileReferenceDisplay(string reference)
     {
         return (reference ?? string.Empty)
@@ -633,6 +596,11 @@ internal static class MarkdownRenderer
 
     private static bool IsExternalUri(string target)
     {
+        if (SolutionContextService.TryParseFileReference(target, out _))
+        {
+            return false;
+        }
+
         if (!Uri.TryCreate(target, UriKind.Absolute, out var uri))
         {
             return false;
@@ -1003,6 +971,12 @@ internal static class MarkdownRenderer
 
     private static IEnumerable<Inline> CreateCodeInlines(string line, string language)
     {
+        if (TryGetCodeFileReferenceTarget(line, language, CurrentOptions.LinkCommand, out var target))
+        {
+            yield return CreateFileReferenceHyperlink(line, target, renderAsInlineCode: false);
+            yield break;
+        }
+
         var regex = SelectSyntaxRegex(language);
         if (regex is null || string.IsNullOrEmpty(line))
         {
@@ -1031,6 +1005,19 @@ internal static class MarkdownRenderer
         {
             yield return new Run(line.Substring(index));
         }
+    }
+
+    internal static bool TryGetCodeFileReferenceTarget(string line, string language, ICommand? command, out string target)
+    {
+        target = string.Empty;
+        if ((language.Length != 0 && language != "text" && language != "plaintext")
+            || !CanExecuteLinkCommand(command, line.Trim()))
+        {
+            return false;
+        }
+
+        target = line.Trim();
+        return true;
     }
 
     private static Regex? SelectSyntaxRegex(string language)

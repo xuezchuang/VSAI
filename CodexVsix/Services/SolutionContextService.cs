@@ -2,9 +2,11 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using EnvDTE;
@@ -241,23 +243,214 @@ public sealed class SolutionContextService
         });
     }
 
-    public void OpenFileInVisualStudio(string path, int? line = null, int? column = null)
+    public bool OpenFileInVisualStudio(string path, int? line = null, int? column = null)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path) || !TryOpenDocumentInVisualStudio(path))
         {
-            return;
+            return false;
         }
 
-        if (!TryOpenDocumentInVisualStudio(path))
+        return !line.HasValue || NavigateActiveDocument(path, line.Value, column);
+    }
+
+    internal static bool TryParseFileReference(string? reference, out FileNavigationTarget target)
+    {
+        target = default;
+        var path = (reference ?? string.Empty).Trim().Trim('`', '\'', '"', '<', '>').TrimEnd('.', ',', ';');
+        if (path.Length == 0)
         {
-            return;
+            return false;
         }
 
-        if (line is > 0)
+        string fragment = string.Empty;
+        // Only explicit file URIs are decoded. Ordinary Windows paths can contain literal % and #.
+        if (path.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
         {
-            NavigateActiveDocument(line.Value, column);
+            if (!Uri.TryCreate(path, UriKind.Absolute, out var fileUri) || !fileUri.IsFile)
+            {
+                return false;
+            }
+
+            fragment = fileUri.Fragment;
+            path = fileUri.LocalPath;
         }
+        else
+        {
+            var fragmentMatch = Regex.Match(path, @"#L?\d+(?:(?:C|:)\d+)?(?:-L?\d+)?$", RegexOptions.IgnoreCase);
+            if (fragmentMatch.Success)
+            {
+                fragment = fragmentMatch.Value;
+                path = path.Substring(0, fragmentMatch.Index);
+            }
+        }
+
+        int? line = null;
+        int? column = null;
+        var position = Regex.Match(path, @"^(?<path>.+?):(?<line>\d+)(?::(?<column>\d+))?$");
+        if (position.Success)
+        {
+            if (!TryReadFilePosition(position, out line, out column))
+            {
+                return false;
+            }
+
+            path = position.Groups["path"].Value;
+        }
+
+        if (fragment.Length > 0)
+        {
+            position = Regex.Match(fragment, @"^#L?(?<line>\d+)(?:(?:C|:)(?<column>\d+))?(?:-L?\d+)?$", RegexOptions.IgnoreCase);
+            if (!position.Success || !TryReadFilePosition(position, out line, out column))
+            {
+                return false;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(path)
+            || path.IndexOfAny(Path.GetInvalidPathChars()) >= 0
+            || (Uri.TryCreate(path, UriKind.Absolute, out var uri) && !uri.IsFile))
+        {
+            return false;
+        }
+
+        target = new FileNavigationTarget(path, line, column);
+        return true;
+    }
+
+    private static bool TryReadFilePosition(Match match, out int? line, out int? column)
+    {
+        line = null;
+        column = null;
+        if (!int.TryParse(match.Groups["line"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var parsedLine)
+            || parsedLine < 1)
+        {
+            return false;
+        }
+
+        line = parsedLine;
+        if (match.Groups["column"].Success)
+        {
+            if (!int.TryParse(match.Groups["column"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var parsedColumn)
+                || parsedColumn < 1)
+            {
+                return false;
+            }
+
+            column = parsedColumn;
+        }
+
+        return true;
+    }
+
+    internal static bool TryResolveFileReference(string? reference, string? workingDirectory, out FileNavigationTarget target)
+    {
+        target = default;
+        if (!TryParseFileReference(reference, out var parsed))
+        {
+            return false;
+        }
+
+        try
+        {
+            var candidates = new List<string> { parsed.Path };
+            // Preserve literal percent characters first, then accept once-escaped Markdown paths.
+            // LocalPath has already decoded explicit file URIs and must not be decoded again.
+            if (!(reference ?? string.Empty).Trim().Trim('`', '\'', '"', '<', '>').StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+            {
+                var decoded = Uri.UnescapeDataString(parsed.Path);
+                if (!string.Equals(decoded, parsed.Path, StringComparison.Ordinal))
+                {
+                    candidates.Add(decoded);
+                }
+            }
+
+            foreach (var candidate in candidates)
+            {
+                var path = candidate;
+                if (!Path.IsPathRooted(path))
+                {
+                    if (string.IsNullOrWhiteSpace(workingDirectory) || !Path.IsPathRooted(workingDirectory))
+                    {
+                        return false;
+                    }
+
+                    path = Path.Combine(workingDirectory, path);
+                }
+
+                // Require a drive root or UNC root instead of depending on devenv's current drive.
+                if (!Regex.IsMatch(path, @"^(?:[A-Za-z]:[\\/]|[\\/]{2})"))
+                {
+                    return false;
+                }
+
+                path = Path.GetFullPath(path);
+                if (File.Exists(path))
+                {
+                    target = new FileNavigationTarget(path, parsed.Line, parsed.Column);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        catch (Exception ex) when (ex is ArgumentException || ex is NotSupportedException || ex is IOException)
+        {
+            return false;
+        }
+    }
+
+    internal static bool IsPotentialRelativeFileReference(string reference)
+    {
+        return TryParseFileReference(reference, out var parsed)
+            && !Path.IsPathRooted(parsed.Path)
+            && Regex.IsMatch(Path.GetExtension(parsed.Path), @"^\.[A-Za-z0-9]{1,12}$");
+    }
+
+    internal static string? FindUnambiguousSolutionFile(string reference, string? solutionDirectory, IEnumerable<string> files)
+    {
+        if (Path.IsPathRooted(reference))
+        {
+            return null;
+        }
+
+        var candidates = files.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (TryResolveFileReference(reference, solutionDirectory, out var exact)
+            && candidates.Contains(exact.Path, StringComparer.OrdinalIgnoreCase))
+        {
+            return exact.Path;
+        }
+
+        var suffix = reference.Replace('\\', '/');
+        while (suffix.StartsWith("./", StringComparison.Ordinal))
+        {
+            suffix = suffix.Substring(2);
+        }
+
+        var matches = candidates.Where(path => path.Replace('\\', '/').EndsWith("/" + suffix, StringComparison.OrdinalIgnoreCase))
+            .Where(File.Exists).Take(2).ToList();
+        return matches.Count == 1 ? matches[0] : null;
+    }
+
+    internal static void ClampNavigationPosition(int line, int? column, int lineCount, Func<int, int> getLineLength,
+        out int targetLine, out int? targetColumn)
+    {
+        targetLine = Math.Max(1, Math.Min(line, Math.Max(1, lineCount)));
+        targetColumn = column.HasValue ? Math.Max(1, Math.Min(column.Value, getLineLength(targetLine) + 1)) : (int?)null;
+    }
+
+    internal readonly struct FileNavigationTarget
+    {
+        public FileNavigationTarget(string path, int? line, int? column)
+        {
+            Path = path;
+            Line = line;
+            Column = column;
+        }
+
+        public string Path { get; }
+        public int? Line { get; }
+        public int? Column { get; }
     }
 
     private static bool TryOpenDocumentInVisualStudio(string path)
@@ -294,7 +487,12 @@ public sealed class SolutionContextService
             }
 
             var window = dte.ItemOperations.OpenFile(path, EnvDTE.Constants.vsViewKindTextView);
-            window?.Activate();
+            if (window is null)
+            {
+                return false;
+            }
+
+            window.Activate();
             return true;
         }
         catch
@@ -303,30 +501,43 @@ public sealed class SolutionContextService
         }
     }
 
-    private static void NavigateActiveDocument(int line, int? column)
+    private static bool NavigateActiveDocument(string path, int line, int? column)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
 
         try
         {
             var dte = Package.GetGlobalService(typeof(DTE)) as DTE;
-            var selection = dte?.ActiveDocument?.Selection as TextSelection;
-            if (selection is null)
+            var document = dte?.ActiveDocument;
+            if (document is null || !string.Equals(document.FullName, path, StringComparison.OrdinalIgnoreCase)
+                || document.Selection is not TextSelection selection
+                || document.Object("TextDocument") is not TextDocument textDocument)
             {
-                return;
+                return false;
             }
 
-            if (column is > 0)
+            var point = textDocument.StartPoint.CreateEditPoint();
+            ClampNavigationPosition(line, column, textDocument.EndPoint.Line, requestedLine =>
             {
-                selection.MoveToLineAndOffset(line, column.Value, false);
+                ThreadHelper.ThrowIfNotOnUIThread();
+                point.MoveToLineAndOffset(requestedLine, 1);
+                return point.LineLength;
+            }, out var targetLine, out var targetColumn);
+
+            if (targetColumn.HasValue)
+            {
+                selection.MoveToLineAndOffset(targetLine, targetColumn.Value, false);
             }
             else
             {
-                selection.GotoLine(line, false);
+                selection.GotoLine(targetLine, false);
             }
+
+            return true;
         }
         catch
         {
+            return false;
         }
     }
 

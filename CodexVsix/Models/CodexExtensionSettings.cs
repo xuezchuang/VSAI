@@ -8,6 +8,7 @@ public sealed class CodexExtensionSettings
     public string CodexExecutablePath { get; set; } = "codex.cmd";
     public string LanguageOverride { get; set; } = "";
     public string WorkingDirectory { get; set; } = "";
+    public bool FollowSolutionDirectory { get; set; } = true;
     public string DefaultModel { get; set; } = "";
     public string ReasoningEffort { get; set; } = "";
     public string ModelVerbosity { get; set; } = "";

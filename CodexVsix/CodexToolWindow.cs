@@ -76,14 +76,14 @@ public sealed class CodexToolWindow : ToolWindowPane
             {
                 _classicControl = new CodexToolWindowControl(
                     () => _rendererCoordinator?.RetryOfficialRenderer("manual-main"));
-                Content = _classicControl;
+                Content = WithWorkspaceSelector(_classicControl);
                 return;
             }
 
             _webViewHost = new CodexOfficialWebViewHost(_viewModel);
             _webViewHost.Ready += OnWebViewReady;
             _webViewHost.FallbackRequested += OnWebViewFallbackRequested;
-            Content = _webViewHost;
+            Content = WithWorkspaceSelector(_webViewHost);
         }
         catch (Exception ex)
         {
@@ -96,6 +96,16 @@ public sealed class CodexToolWindow : ToolWindowPane
 
             Content = CreateErrorView(ex);
         }
+    }
+
+    private FrameworkElement WithWorkspaceSelector(FrameworkElement renderer)
+    {
+        var panel = new DockPanel();
+        var selector = new CodexWorkspaceSelector { DataContext = _viewModel };
+        DockPanel.SetDock(selector, Dock.Bottom);
+        panel.Children.Add(selector);
+        panel.Children.Add(renderer);
+        return panel;
     }
 
     protected override void Dispose(bool disposing)

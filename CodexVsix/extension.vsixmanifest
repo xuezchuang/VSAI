@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Vsix xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
   <Identifier Id="VSAI.2100D026-139B-4827-A538-306555F3C0BC">
-    <Name>VSAI (WPF Preview)</Name>
+    <Name>VSAI</Name>
     <Author>xuezchuang</Author>
     <Version>1.0.0</Version>
-    <Description xml:space="preserve">VSAI (WPF Preview) adds a docked Codex tool window to Visual Studio 2022 and 2026 with chat, approvals, image attachments, and solution-aware context. This extension is an independent project and is not affiliated with, endorsed by, or officially associated with OpenAI or ChatGPT. Any logos or references used are for integration purposes only.</Description>
+    <Description xml:space="preserve">VSAI adds a docked Codex tool window to Visual Studio 2022 and 2026 with chat, approvals, image attachments, and solution-aware context. This extension is an independent project and is not affiliated with, endorsed by, or officially associated with OpenAI or ChatGPT. Any logos or references used are for integration purposes only.</Description>
     <Locale>en-US</Locale>
-    <MoreInfo>https://github.com/rodrigojager/codex-visual-studio-extension</MoreInfo>
-    <GettingStartedGuide>https://github.com/rodrigojager/codex-visual-studio-extension#readme</GettingStartedGuide>
-    <ReleaseNotes>https://github.com/rodrigojager/codex-visual-studio-extension/releases</ReleaseNotes>
+    <MoreInfo>https://github.com/xuezchuang/VSAI</MoreInfo>
+    <GettingStartedGuide>https://github.com/xuezchuang/VSAI#readme</GettingStartedGuide>
+    <ReleaseNotes>https://github.com/xuezchuang/VSAI/releases</ReleaseNotes>
     <Icon>Resources\MarketplaceIcon.png</Icon>
     <Tags>codex;openai;ai;assistant;chat;visual studio;tool window</Tags>
   </Identifier>

@@ -134,6 +134,10 @@
     <EmbeddedResource Include="UI\Assets\mermaid.min.js">
       <LogicalName>CodexVsix.UI.Assets.mermaid.min.js</LogicalName>
     </EmbeddedResource>
+    <Content Include="UI\CodexWebview\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <IncludeInVSIX>true</IncludeInVSIX>
+    </Content>
     <None Include="source.extension.vsixmanifest">
       <SubType>Designer</SubType>
     </None>

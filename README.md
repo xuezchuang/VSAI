@@ -1,4 +1,15 @@
-# Visual Codex Studio
+# VSAI
+
+个人使用的 Visual Studio Codex 定制版，版本 **1.0.0**。本仓库保持私有，不发布到 Visual Studio Marketplace。
+
+主界面使用原有 Codex WebView，保留文件夹选择、会话安全、文件跳转和设置持久化修复。原生界面仅用于 WebView 加载失败时的回退。
+
+基于 [Visual Codex Studio](https://github.com/rodrigojager/codex-visual-studio-extension) 1.3.4，保留上游历史、LICENSE 和第三方资源声明。
+本地构建输出为 `CodexVsix\VSAI.vsix`，在 Visual Studio 的“视图 → VSAI”打开。
+
+以下为上游文档，版本与公开发行信息属于上游项目。
+
+## Visual Codex Studio (upstream)
 
 Run Codex inside Visual Studio without leaving the IDE.
 
@@ -189,7 +200,7 @@ dotnet test CodexVs2026Extension.sln -c Release --no-restore
   /p:BuildVsixPackage=true
 
 .\scripts\Test-VsixPackage.ps1 `
-  -VsixPath CodexVsix\CodexVsix.vsix `
+  -VsixPath CodexVsix\VSAI.vsix `
   -ExpectedVersion $version
 ```
 

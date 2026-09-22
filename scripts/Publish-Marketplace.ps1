@@ -4,7 +4,7 @@ param(
 
     [string]$InternalName = "codex-for-visual-studio",
 
-    [string]$VsixPath = "CodexVsix\CodexVsix.vsix",
+    [string]$VsixPath = "CodexVsix\VSAI.vsix",
 
     [string]$OverviewFile = "marketplace\overview.md",
 

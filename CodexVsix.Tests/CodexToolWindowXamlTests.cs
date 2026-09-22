@@ -51,34 +51,41 @@ public sealed class CodexToolWindowXamlTests
     }
 
     [Fact]
-    public void SettingsOpenAsWpfInTheDocumentWellAndPreserveRequestedSections()
+    public void SettingsOpenAsAnIndependentOfficialWebViewInTheDocumentWell()
     {
         var managerSource = File.ReadAllText(FindRepositoryFile("CodexVsix", "CodexToolWindowManager.cs"));
         var settingsWindowSource = File.ReadAllText(FindRepositoryFile("CodexVsix", "CodexSettingsToolWindow.cs"));
 
+        Assert.Contains("[Guid(GuidList.SettingsToolWindowPersistenceString)]", settingsWindowSource);
         Assert.Contains("VSFM_MdiChild", managerSource);
         Assert.Contains("VSFPROPID_FrameMode", managerSource);
-        Assert.Contains("Content = new CodexSettingsToolWindowControl();", settingsWindowSource);
-        Assert.Contains("EnsureExternalSettingsSection(\"codex\")", settingsWindowSource);
-        Assert.Contains("EnsureExternalSettingsSection(section)", settingsWindowSource);
-        Assert.Contains("[Guid(GuidList.SettingsToolWindowPersistenceString)]", settingsWindowSource);
-        Assert.DoesNotContain("CodexOfficialWebViewHost", settingsWindowSource);
-        Assert.DoesNotContain("CodexRendererCoordinator", settingsWindowSource);
+        Assert.Contains("initialRoute: \"/settings\"", settingsWindowSource);
+        Assert.Contains("isSettingsSurface: true", settingsWindowSource);
+        Assert.Contains("registerAsPrimaryHost: false", settingsWindowSource);
+        Assert.DoesNotContain("Content = new CodexSettingsToolWindowControl();", settingsWindowSource.Split(new[] { "OnWebViewFallbackRequested" }, StringSplitOptions.None)[0]);
+        var fallbackHandler = ExtractMethod(
+            settingsWindowSource,
+            "private void OnWebViewFallbackRequested",
+            "private void OnRendererSwitching");
+        Assert.Contains("ShowLocalClassicFallback(e.FailureKind, e.Reason);", fallbackHandler);
+        Assert.DoesNotContain("ReportOfficialFailure", fallbackHandler);
     }
 
     [Fact]
-    public void MainWindowUsesWpfDirectlyWithTheWorkspaceSelector()
+    public void MainWindowUsesOneCoordinatorSelectedRendererAtATime()
     {
         var toolWindowSource = File.ReadAllText(FindRepositoryFile("CodexVsix", "CodexToolWindow.cs"));
         var classicControlSource = File.ReadAllText(FindRepositoryFile("CodexVsix", "CodexToolWindowControl.xaml.cs"));
 
-        Assert.Contains("_classicControl = new CodexToolWindowControl();", toolWindowSource);
-        Assert.Contains("Content = WithWorkspaceSelector(_classicControl);", toolWindowSource);
-        Assert.Contains("new CodexWorkspaceSelector { DataContext = _viewModel }", toolWindowSource);
         Assert.Contains("[Guid(GuidList.ToolWindowPersistanceString)]", toolWindowSource);
-        Assert.Contains("_classicControl?.Dispose();", toolWindowSource);
-        Assert.DoesNotContain("CodexRendererCoordinator", toolWindowSource);
-        Assert.DoesNotContain("CodexOfficialWebViewHost", toolWindowSource);
+        Assert.Contains("Content = WithWorkspaceSelector(_webViewHost);", toolWindowSource);
+        Assert.Contains("Content = WithWorkspaceSelector(_classicControl);", toolWindowSource);
+        Assert.Contains("CodexRendererCoordinator.Shared", toolWindowSource);
+        Assert.Contains("if (renderer == CodexRendererKind.ClassicWpf)", toolWindowSource);
+        Assert.Contains("_webViewHost = new CodexOfficialWebViewHost(_viewModel);", toolWindowSource);
+        Assert.Contains("_classicControl = new CodexToolWindowControl(", toolWindowSource);
+        Assert.Contains("RetryOfficialRenderer(\"manual-main\")", toolWindowSource);
+        Assert.Contains("DisposeActiveRenderer();", toolWindowSource);
         Assert.DoesNotContain("CodexOfficialWebViewHost", classicControlSource);
     }
 
@@ -128,20 +135,22 @@ public sealed class CodexToolWindowXamlTests
         Assert.DoesNotContain("_statusLayer.MouseLeftButtonUp +=", hostSource);
     }
 
-    [Theory]
-    [InlineData("CodexToolWindowControl")]
-    [InlineData("CodexSettingsToolWindowControl")]
-    public void WpfSurfacesDoNotOfferAnUnavailableModernInterface(string controlName)
+    [Fact]
+    public void EveryClassicFallbackSurfaceOffersAModernInterfaceRetry()
     {
-        var document = XDocument.Load(FindRepositoryFile("CodexVsix", controlName + ".xaml"));
-        var controlSource = File.ReadAllText(FindRepositoryFile("CodexVsix", controlName + ".xaml.cs"));
+        var mainDocument = XDocument.Load(FindRepositoryFile("CodexVsix", "CodexToolWindowControl.xaml"));
+        var settingsDocument = XDocument.Load(FindRepositoryFile("CodexVsix", "CodexSettingsToolWindowControl.xaml"));
 
-        Assert.DoesNotContain(
-            document.Descendants(PresentationNamespace + "Button"),
+        Assert.Single(
+            mainDocument.Descendants(PresentationNamespace + "Button"),
             element => element.Attributes().Any(attribute =>
-                attribute.Value.Contains("RetryModernInterface")));
-        Assert.DoesNotContain("retryModernInterface", controlSource);
-        Assert.DoesNotContain("OnRetryModernInterfaceClick", controlSource);
+                attribute.Name.LocalName == "Name"
+                && attribute.Value == "RetryModernInterfaceButton"));
+        Assert.Single(
+            settingsDocument.Descendants(PresentationNamespace + "Button"),
+            element => element.Attributes().Any(attribute =>
+                attribute.Name.LocalName == "Name"
+                && attribute.Value == "RetryModernInterfaceButton"));
     }
 
     [Fact]

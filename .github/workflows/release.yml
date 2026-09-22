@@ -96,12 +96,13 @@ jobs:
       - name: Build VSIX
         shell: pwsh
         run: |
-          Remove-Item -LiteralPath CodexVsix\CodexVsix.vsix -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath CodexVsix\VSAI.vsix -ErrorAction SilentlyContinue
           msbuild CodexVsix\CodexVsix.csproj `
             /t:Rebuild `
             /m `
             /p:Configuration=Release `
             /p:RestoreLockedMode=true `
+            /p:DeployExtension=false `
             /p:BuildVsixPackage=true `
             /p:Version=${{ steps.version.outputs.version }}
 
@@ -109,7 +110,7 @@ jobs:
         shell: pwsh
         run: |
           .\scripts\Test-VsixPackage.ps1 `
-            -VsixPath CodexVsix\CodexVsix.vsix `
+            -VsixPath CodexVsix\VSAI.vsix `
             -ExpectedVersion "${{ steps.version.outputs.version }}"
 
       - name: Sign VSIX when signing credentials are configured
@@ -129,10 +130,10 @@ jobs:
               -p $env:VSIX_SIGNING_PFX_PASSWORD `
               -cfp $env:VSIX_SIGNING_CERT_SHA256 `
               -fd SHA256 `
-              -d "Visual Codex Studio VSIX" `
-              -u "https://github.com/rodrigojager/codex-visual-studio-extension" `
+              -d "VSAI VSIX" `
+              -u "https://github.com/xuezchuang/VSAI" `
               -t "http://timestamp.acs.microsoft.com/" `
-              CodexVsix\CodexVsix.vsix
+              CodexVsix\VSAI.vsix
             if ($LASTEXITCODE -ne 0) {
               throw "Sign CLI encerrou com código $LASTEXITCODE."
             }
@@ -146,7 +147,7 @@ jobs:
         shell: pwsh
         run: |
           .\scripts\Test-VsixPackage.ps1 `
-            -VsixPath CodexVsix\CodexVsix.vsix `
+            -VsixPath CodexVsix\VSAI.vsix `
             -ExpectedVersion "${{ steps.version.outputs.version }}" `
             -RequireSignature
 
@@ -155,14 +156,14 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          $target = Join-Path (Resolve-Path artifacts) ("Visual-Codex-Studio-" + "${{ steps.version.outputs.version }}" + ".vsix")
-          Copy-Item -LiteralPath CodexVsix\CodexVsix.vsix -Destination $target -Force
+          $target = Join-Path (Resolve-Path artifacts) ("VSAI-" + "${{ steps.version.outputs.version }}" + ".vsix")
+          Copy-Item -LiteralPath CodexVsix\VSAI.vsix -Destination $target -Force
           "path=$($target -replace '\\', '/')" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Visual-Codex-Studio-${{ steps.version.outputs.version }}
+          name: VSAI-${{ steps.version.outputs.version }}
           path: ${{ steps.package.outputs.path }}
 
       - name: Publish GitHub release
@@ -170,7 +171,7 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          name: Visual Codex Studio v${{ steps.version.outputs.version }}
+          name: VSAI v${{ steps.version.outputs.version }}
           files: ${{ steps.package.outputs.path }}
           generate_release_notes: true
           prerelease: ${{ steps.version.outputs.prerelease == 'true' }}

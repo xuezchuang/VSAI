@@ -21,7 +21,7 @@
         <Parent guid="guidCodexCommandSet" id="MyMenuGroup" />
         <Icon guid="guidImages" id="bmpPic1" />
         <Strings>
-          <ButtonText>VSAI (WPF)</ButtonText>
+          <ButtonText>VSAI</ButtonText>
           <CommandName>View.VSAI</CommandName>
           <LocCanonicalName>View.VSAI</LocCanonicalName>
         </Strings>

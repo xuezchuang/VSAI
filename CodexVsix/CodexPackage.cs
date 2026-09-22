@@ -10,7 +10,7 @@ using Microsoft.VisualStudio.Shell;
 namespace CodexVsix;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VSAI (WPF Preview)", "WPF tool window integration for Codex", ExtensionInfo.Version)]
+[InstalledProductRegistration("VSAI", "Visual Studio integration for Codex", ExtensionInfo.Version)]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(VSConstants.UICONTEXT.SolutionExists_string, PackageAutoLoadFlags.BackgroundLoad)]
 [ProvideToolWindow(typeof(CodexToolWindow))]

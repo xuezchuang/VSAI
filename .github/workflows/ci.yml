@@ -53,6 +53,7 @@ jobs:
             /m `
             /p:Configuration=Release `
             /p:RestoreLockedMode=true `
+            /p:DeployExtension=false `
             /p:BuildVsixPackage=true
 
       - name: Verify VSIX structure and versions
@@ -61,11 +62,11 @@ jobs:
           [xml]$props = Get-Content Directory.Build.props -Raw
           $version = $props.Project.PropertyGroup.Version
           .\scripts\Test-VsixPackage.ps1 `
-            -VsixPath CodexVsix\CodexVsix.vsix `
+            -VsixPath CodexVsix\VSAI.vsix `
             -ExpectedVersion $version
 
       - name: Upload VSIX
         uses: actions/upload-artifact@v4
         with:
-          name: Visual-Codex-Studio-${{ github.sha }}
-          path: CodexVsix/CodexVsix.vsix
+          name: VSAI-${{ github.sha }}
+          path: CodexVsix/VSAI.vsix

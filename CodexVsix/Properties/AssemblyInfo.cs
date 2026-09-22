@@ -6,7 +6,7 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyDescription("Codex tool window for Visual Studio")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("xuezchuang")]
-[assembly: AssemblyProduct("VSAI (WPF Preview)")]
+[assembly: AssemblyProduct("VSAI")]
 [assembly: AssemblyCopyright("Copyright © 2026 Rodrigo Jager")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]

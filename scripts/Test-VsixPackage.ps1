@@ -44,7 +44,11 @@ try {
         "Microsoft.Web.WebView2.Wpf.dll",
         "LICENSE",
         "THIRD-PARTY-NOTICES.md",
-        "Resources\MarketplaceIcon.png"
+        "Resources\MarketplaceIcon.png",
+        "UI\CodexWebview\webview\index.html",
+        "UI\CodexWebview\codex-acquire-vscode-api-shim.js",
+        "UI\CodexWebview\codex-visual-studio-history-guard.js",
+        "UI\CodexWebview\codex-visual-studio-diagnostics.js"
     )
 
     foreach ($relativePath in $requiredFiles) {
@@ -67,8 +71,31 @@ try {
         throw "The VSIX contains credential or signing-material files: $entryNames"
     }
 
-    if (Test-Path -LiteralPath (Join-Path $extractPath "UI\CodexWebview")) {
-        throw "The WPF preview package must not contain the frozen Codex frontend."
+    $webviewFiles = @(Get-ChildItem -LiteralPath (Join-Path $extractPath "UI\CodexWebview") -Recurse -File)
+    if ($webviewFiles.Count -lt 1304) {
+        throw "The VSIX contains only $($webviewFiles.Count) official Codex webview files; at least 1304 are required."
+    }
+
+    $duplicatedWebviewPaths = @($webviewFiles | Where-Object {
+        $_.FullName.Replace("/", "\") -match "UI\\CodexWebview\\.*UI\\CodexWebview\\"
+    })
+    if ($duplicatedWebviewPaths.Count -gt 0) {
+        throw "The official Codex webview was packaged under a duplicated UI/CodexWebview path."
+    }
+
+    $localeBundles = @($webviewFiles | Where-Object {
+        $_.DirectoryName -like "*UI\CodexWebview\webview\assets" -and
+        $_.Length -gt 300000 -and
+        $_.BaseName -match "^[a-z]{2}(?:-[A-Z0-9]{2,3})?-"
+    })
+    if ($localeBundles.Count -lt 60) {
+        throw "The VSIX contains only $($localeBundles.Count) official locale bundles; at least 60 are required."
+    }
+
+    foreach ($localePrefix in @("pt-BR-", "pt-PT-")) {
+        if (-not ($localeBundles | Where-Object { $_.Name.StartsWith($localePrefix, [StringComparison]::Ordinal) })) {
+            throw "Required official locale bundle is missing: $localePrefix"
+        }
     }
 
     if (Test-Path -LiteralPath (Join-Path $extractPath "MessagePack.dll")) {
@@ -131,8 +158,9 @@ try {
     Write-Output "VERSION=$manifestVersion"
     Write-Output "ASSEMBLY_VERSION=$assemblyVersion"
     Write-Output "NEWTONSOFT_FILE_VERSION=$newtonsoftFileVersion"
-    Write-Output "RENDERER=WPF"
-    Write-Output "FROZEN_WEBVIEW_INCLUDED=false"
+    Write-Output "RENDERER=WebView"
+    Write-Output "WEBVIEW_FILES=$($webviewFiles.Count)"
+    Write-Output "LOCALE_BUNDLES=$($localeBundles.Count)"
     Write-Output "SHA256=$packageHash"
     Write-Output "SIGNED=$($isSigned.ToString().ToLowerInvariant())"
 }

@@ -2,7 +2,8 @@ namespace CodexVsix;
 
 internal static class GuidList
 {
-    public const string PackageString = "A0B554A1-1D5E-4EC3-8CA9-0A7994B64A61";
-    public const string CommandSetString = "B6A6996F-D0BE-4D45-9C77-CE4A3ED3D8D8";
-    public const string ToolWindowPersistanceString = "2DB0A8C6-6C41-4A0F-B440-98A1A6C7076E";
+    public const string PackageString = "2100D026-139B-4827-A538-306555F3C0BC";
+    public const string CommandSetString = "D4816E82-BF74-488D-8CE6-F3FBCA38A05E";
+    public const string SettingsToolWindowPersistenceString = "B3011C4A-DB8B-46AD-AFBF-6429101EF37D";
+    public const string ToolWindowPersistanceString = "E25879F7-F0BB-4691-80AB-96808274E244";
 }

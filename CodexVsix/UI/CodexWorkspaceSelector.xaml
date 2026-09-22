@@ -12,9 +12,34 @@
             <TextBlock Margin="0,0,6,0" VerticalAlignment="Center"
                        Foreground="{DynamicResource {x:Static themes:EnvironmentColors.ToolWindowTextBrushKey}}"
                        Text="{Binding Localization.NewChatFolderLabel}" />
-            <Button Grid.Column="1" Padding="6,3" HorizontalContentAlignment="Stretch"
+            <Button Grid.Column="1" Padding="8,5" HorizontalContentAlignment="Stretch"
+                    Foreground="{DynamicResource {x:Static themes:EnvironmentColors.ToolWindowTextBrushKey}}"
+                    Background="{DynamicResource {x:Static themes:EnvironmentColors.ToolWindowBackgroundBrushKey}}"
+                    BorderBrush="{DynamicResource {x:Static themes:EnvironmentColors.PanelBorderBrushKey}}"
+                    BorderThickness="1"
                     Click="OnOpenMenu" ToolTip="{Binding Localization.ChangeWorkingDirectoryHint}"
                     AutomationProperties.Name="{Binding Localization.ChooseWorkingDirectoryLabel}">
+                <Button.Template>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="ButtonBorder" CornerRadius="6"
+                                Padding="{TemplateBinding Padding}"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ButtonBorder" Property="Background"
+                                        Value="{DynamicResource {x:Static themes:EnvironmentColors.CommandBarHoverBrushKey}}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.55" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Button.Template>
                 <Button.ContextMenu>
                     <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
                         <MenuItem Header="{Binding Localization.ChooseWorkingDirectoryLabel}"

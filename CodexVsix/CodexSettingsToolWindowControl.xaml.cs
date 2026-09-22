@@ -11,12 +11,10 @@ namespace CodexVsix;
 public partial class CodexSettingsToolWindowControl : UserControl
 {
     private readonly CodexToolWindowViewModel _viewModel;
-    private readonly Action? _retryModernInterface;
 
-    public CodexSettingsToolWindowControl(Action? retryModernInterface = null)
+    public CodexSettingsToolWindowControl()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        _retryModernInterface = retryModernInterface;
         try
         {
             InitializeComponent();
@@ -40,11 +38,6 @@ public partial class CodexSettingsToolWindowControl : UserControl
         DataContext = _viewModel;
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
         Unloaded += OnUnloaded;
-    }
-
-    private void OnRetryModernInterfaceClick(object sender, RoutedEventArgs e)
-    {
-        _retryModernInterface?.Invoke();
     }
 
     private void OnLoaded(object sender, System.Windows.RoutedEventArgs e)

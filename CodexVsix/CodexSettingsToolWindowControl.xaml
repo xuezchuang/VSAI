@@ -277,14 +277,6 @@
     <Grid Background="{StaticResource WindowBrush}">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
             <StackPanel Margin="20">
-                <Button x:Name="RetryModernInterfaceButton"
-                        Margin="0,0,0,16"
-                        HorizontalAlignment="Left"
-                        Style="{StaticResource CardButtonStyle}"
-                        Content="{Binding Localization.RetryModernInterfaceButton}"
-                        ToolTip="{Binding Localization.RetryModernInterfaceButton}"
-                        Click="OnRetryModernInterfaceClick" />
-
                 <TextBlock x:Name="SettingsPlaceholderText"
                            Foreground="{StaticResource TextMutedBrush}"
                            FontSize="14"

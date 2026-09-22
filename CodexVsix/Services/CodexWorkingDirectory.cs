@@ -21,7 +21,7 @@ internal static class CodexWorkingDirectory
         // A new thread must report that directory's error instead of running in another folder.
         return Normalize(string.IsNullOrWhiteSpace(directory)
             ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
-            : directory);
+            : directory!);
     }
 
     public static bool Select(

@@ -1687,15 +1687,6 @@
                             Orientation="Horizontal"
                             HorizontalAlignment="Right"
                             VerticalAlignment="Center">
-                    <Button x:Name="RetryModernInterfaceButton"
-                            Height="28"
-                            Margin="0,0,8,0"
-                            Padding="10,0"
-                            Style="{StaticResource ChipButtonStyle}"
-                            Content="{Binding Localization.RetryModernInterfaceButton}"
-                            ToolTip="{Binding Localization.RetryModernInterfaceButton}"
-                            Click="OnRetryModernInterfaceClick" />
-
                     <Button Width="32"
                             Height="28"
                             Margin="0,0,6,0"

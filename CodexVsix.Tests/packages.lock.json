@@ -1593,7 +1593,7 @@
           "xunit.extensibility.core": "[2.9.3]"
         }
       },
-      "codexvsix": {
+      "vsai": {
         "type": "Project",
         "dependencies": {
           "Community.VisualStudio.Toolkit.17": "[17.0.551, )",

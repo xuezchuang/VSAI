@@ -967,7 +967,7 @@ internal sealed class CodexOfficialWebViewHost : Grid, IDisposable
             : "WebView2";
         return Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "CodexVsix",
+            "VSAI",
             directoryName);
     }
 

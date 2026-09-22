@@ -52,7 +52,7 @@ internal sealed class CodexDiagnosticLogger
     public CodexDiagnosticLogger()
         : this(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "CodexVsix",
+            "VSAI",
             "logs"))
     {
     }

@@ -2091,6 +2091,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
 
     private void ChooseWorkingDirectory()
     {
+        ThreadHelper.ThrowIfNotOnUIThread();
         ChangeWorkspaceFromCommand(() => WorkspaceDirectoryPicker.Pick(
             Settings.WorkingDirectory,
             _localization.ChooseWorkingDirectoryLabel), followSolutionDirectory: false);
@@ -2098,6 +2099,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
 
     private void UseSolutionDirectory()
     {
+        ThreadHelper.ThrowIfNotOnUIThread();
         ChangeWorkspaceFromCommand(
             () => _solutionContextService.GetBestWorkingDirectory(), followSolutionDirectory: true);
     }

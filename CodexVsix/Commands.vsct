@@ -21,9 +21,9 @@
         <Parent guid="guidCodexCommandSet" id="MyMenuGroup" />
         <Icon guid="guidImages" id="bmpPic1" />
         <Strings>
-          <ButtonText>Codex</ButtonText>
-          <CommandName>View.VisualCodexStudio</CommandName>
-          <LocCanonicalName>View.VisualCodexStudio</LocCanonicalName>
+          <ButtonText>VSAI (WPF)</ButtonText>
+          <CommandName>View.VSAI</CommandName>
+          <LocCanonicalName>View.VSAI</LocCanonicalName>
         </Strings>
       </Button>
       <Button guid="guidCodexCommandSet" id="OpenSidebarCommand" priority="0x0110" type="Button">
@@ -31,8 +31,8 @@
         <Icon guid="guidImages" id="bmpPic1" />
         <Strings>
           <ButtonText>Open Codex Sidebar</ButtonText>
-          <CommandName>Codex.OpenSidebar</CommandName>
-          <LocCanonicalName>Codex.OpenSidebar</LocCanonicalName>
+          <CommandName>VSAI.OpenSidebar</CommandName>
+          <LocCanonicalName>VSAI.OpenSidebar</LocCanonicalName>
         </Strings>
       </Button>
       <Button guid="guidCodexCommandSet" id="NewCodexAgentCommand" priority="0x0120" type="Button">
@@ -40,8 +40,8 @@
         <Icon guid="guidImages" id="bmpPic1" />
         <Strings>
           <ButtonText>New Codex Agent</ButtonText>
-          <CommandName>Codex.NewAgent</CommandName>
-          <LocCanonicalName>Codex.NewAgent</LocCanonicalName>
+          <CommandName>VSAI.NewAgent</CommandName>
+          <LocCanonicalName>VSAI.NewAgent</LocCanonicalName>
         </Strings>
       </Button>
       <Button guid="guidCodexCommandSet" id="OpenCodexSettingsCommand" priority="0x0130" type="Button">
@@ -49,8 +49,8 @@
         <Icon guid="guidImages" id="bmpPic1" />
         <Strings>
           <ButtonText>Codex Settings</ButtonText>
-          <CommandName>Codex.OpenSettings</CommandName>
-          <LocCanonicalName>Codex.OpenSettings</LocCanonicalName>
+          <CommandName>VSAI.OpenSettings</CommandName>
+          <LocCanonicalName>VSAI.OpenSettings</LocCanonicalName>
         </Strings>
       </Button>
       <Button guid="guidCodexCommandSet" id="ImplementTodoCommand" priority="0x0100" type="Button">
@@ -58,8 +58,8 @@
         <Icon guid="guidImages" id="bmpPic1" />
         <Strings>
           <ButtonText>Implement with Codex</ButtonText>
-          <CommandName>Codex.ImplementWithCodex</CommandName>
-          <LocCanonicalName>Codex.ImplementWithCodex</LocCanonicalName>
+          <CommandName>VSAI.ImplementWithCodex</CommandName>
+          <LocCanonicalName>VSAI.ImplementWithCodex</LocCanonicalName>
         </Strings>
       </Button>
       <Button guid="guidCodexCommandSet" id="AddSelectionToThreadCommand" priority="0x0110" type="Button">
@@ -67,8 +67,8 @@
         <Icon guid="guidImages" id="bmpPic1" />
         <Strings>
           <ButtonText>Add to Codex Thread</ButtonText>
-          <CommandName>Codex.AddToThread</CommandName>
-          <LocCanonicalName>Codex.AddToThread</LocCanonicalName>
+          <CommandName>VSAI.AddToThread</CommandName>
+          <LocCanonicalName>VSAI.AddToThread</LocCanonicalName>
         </Strings>
       </Button>
       <Button guid="guidCodexCommandSet" id="ReviewSelectionCommand" priority="0x0120" type="Button">
@@ -76,8 +76,8 @@
         <Icon guid="guidImages" id="bmpPic1" />
         <Strings>
           <ButtonText>Review with Codex</ButtonText>
-          <CommandName>Codex.ReviewSelection</CommandName>
-          <LocCanonicalName>Codex.ReviewSelection</LocCanonicalName>
+          <CommandName>VSAI.ReviewSelection</CommandName>
+          <LocCanonicalName>VSAI.ReviewSelection</LocCanonicalName>
         </Strings>
       </Button>
       <Button guid="guidCodexCommandSet" id="AddFileToThreadCommand" priority="0x0100" type="Button">
@@ -85,8 +85,8 @@
         <Icon guid="guidImages" id="bmpPic1" />
         <Strings>
           <ButtonText>Add File to Codex Thread</ButtonText>
-          <CommandName>Codex.AddFileToThread</CommandName>
-          <LocCanonicalName>Codex.AddFileToThread</LocCanonicalName>
+          <CommandName>VSAI.AddFileToThread</CommandName>
+          <LocCanonicalName>VSAI.AddFileToThread</LocCanonicalName>
         </Strings>
       </Button>
     </Buttons>
@@ -101,8 +101,8 @@
   </KeyBindings>
 
   <Symbols>
-    <GuidSymbol name="guidCodexPackage" value="{A0B554A1-1D5E-4EC3-8CA9-0A7994B64A61}" />
-    <GuidSymbol name="guidCodexCommandSet" value="{B6A6996F-D0BE-4D45-9C77-CE4A3ED3D8D8}">
+    <GuidSymbol name="guidCodexPackage" value="{2100D026-139B-4827-A538-306555F3C0BC}" />
+    <GuidSymbol name="guidCodexCommandSet" value="{D4816E82-BF74-488D-8CE6-F3FBCA38A05E}">
       <IDSymbol name="MyMenuGroup" value="0x1020" />
       <IDSymbol name="CodexEditorContextGroup" value="0x1021" />
       <IDSymbol name="CodexItemContextGroup" value="0x1022" />
@@ -115,7 +115,7 @@
       <IDSymbol name="ImplementTodoCommand" value="0x0106" />
       <IDSymbol name="OpenCodexSettingsCommand" value="0x0107" />
     </GuidSymbol>
-    <GuidSymbol name="guidImages" value="{7BC2A5B9-7BC4-44AD-BF73-4D8C4634D7A7}">
+    <GuidSymbol name="guidImages" value="{3CDC7701-15F4-48AD-A3D5-EEEBDBB2BA30}">
       <IDSymbol name="bmpPic1" value="1" />
     </GuidSymbol>
   </Symbols>

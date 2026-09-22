@@ -21,8 +21,8 @@ public sealed class ExtensionSettingsStore
 
     public ExtensionSettingsStore()
         : this(
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexVsix", "settings.json"),
-            @"Local\CodexVsix.Settings")
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VSAI", "settings.json"),
+            @"Local\VSAI.Settings")
     {
     }
 

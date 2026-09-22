@@ -22,7 +22,6 @@ namespace CodexVsix;
 public partial class CodexToolWindowControl : UserControl, IDisposable
 {
     private readonly CodexToolWindowViewModel _viewModel;
-    private readonly Action? _retryModernInterface;
     private readonly List<FrameworkElement> _chatSelectableElements = new();
     private readonly HashSet<ChatMessage> _subscribedChatMessages = new();
     private FrameworkElement? _selectionAnchorElement;
@@ -33,10 +32,9 @@ public partial class CodexToolWindowControl : UserControl, IDisposable
     private bool _suppressUserInputWindowClosedCancel;
     private bool _disposed;
 
-    public CodexToolWindowControl(Action? retryModernInterface = null)
+    public CodexToolWindowControl()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        _retryModernInterface = retryModernInterface;
         try
         {
             InitializeComponent();
@@ -69,11 +67,6 @@ public partial class CodexToolWindowControl : UserControl, IDisposable
         Unloaded += OnUnloaded;
         SizeChanged += OnSizeChanged;
         PreviewKeyDown += OnPreviewKeyDown;
-    }
-
-    private void OnRetryModernInterfaceClick(object sender, RoutedEventArgs e)
-    {
-        _retryModernInterface?.Invoke();
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)

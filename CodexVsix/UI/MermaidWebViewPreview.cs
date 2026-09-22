@@ -140,7 +140,7 @@ internal sealed class MermaidWebViewPreview : Grid
         {
             var userDataFolder = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "CodexVsix",
+                "VSAI",
                 "WebView2");
             Directory.CreateDirectory(userDataFolder);
             var assetsFolder = EnsureLocalAssets();
@@ -640,7 +640,7 @@ internal sealed class MermaidWebViewPreview : Grid
     {
         var assetsFolder = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "CodexVsix",
+            "VSAI",
             "WebView2Assets");
         Directory.CreateDirectory(assetsFolder);
 

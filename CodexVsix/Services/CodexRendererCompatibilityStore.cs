@@ -50,7 +50,7 @@ internal sealed class CodexRendererCompatibilityStore
         : this(
             Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "CodexVsix",
+                "VSAI",
                 "renderer-compatibility.json"),
             @"Local\CodexVsix.RendererCompatibility")
     {

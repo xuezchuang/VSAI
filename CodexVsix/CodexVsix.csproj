@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <AssemblyName>CodexVsix</AssemblyName>
-    <TargetName>CodexVsix</TargetName>
+    <AssemblyName>VSAI</AssemblyName>
+    <TargetName>VSAI</TargetName>
     <TargetFramework>net472</TargetFramework>
     <UseWPF>true</UseWPF>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
@@ -134,10 +134,6 @@
     <EmbeddedResource Include="UI\Assets\mermaid.min.js">
       <LogicalName>CodexVsix.UI.Assets.mermaid.min.js</LogicalName>
     </EmbeddedResource>
-    <Content Include="UI\CodexWebview\**\*">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <IncludeInVSIX>true</IncludeInVSIX>
-    </Content>
     <None Include="source.extension.vsixmanifest">
       <SubType>Designer</SubType>
     </None>

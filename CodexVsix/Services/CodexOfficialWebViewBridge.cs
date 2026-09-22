@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -76,6 +77,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         _routeChanged = routeChanged;
         _workspaceDirectory = ResolveWorkingDirectory();
         _viewModel.WorkingDirectoryChanged += OnWorkingDirectoryChanged;
+        _viewModel.PropertyChanged += OnProjectSettingsPropertyChanged;
         _appServerRequestRelay = new CodexAppServerRequestRelay(Post);
         _appServerRequestForwarder = _appServerRequestRelay.ForwardAsync;
         _historyWindowController = new CodexWebViewHistoryWindowController(PostHistoryWindowStatus);
@@ -91,6 +93,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
             },
             LogInformation);
         _processService.AppServerNotificationReceived += OnAppServerNotificationReceived;
+        _processService.ProvidersChanged += OnProvidersChanged;
     }
 
     public async Task HandleEnvelopeAsync(JObject envelope, CancellationToken cancellationToken)
@@ -115,6 +118,12 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
 
             case "query-cache-invalidate":
                 HandleQueryCacheInvalidation(message);
+                return;
+
+            case "providers-request":
+            case "providers-save":
+            case "providers-delete":
+                await HandleProvidersAsync(message, cancellationToken).ConfigureAwait(false);
                 return;
 
             case "fetch":
@@ -189,6 +198,12 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
 
             case "diagnostic-settings-set":
                 SetDiagnosticLogging(message["enabled"]?.Value<bool>() == true);
+                return;
+
+            case "project-settings-request":
+            case "project-settings-choose-directory":
+            case "project-settings-use-solution-directory":
+                await HandleProjectSettingsAsync(type, cancellationToken).ConfigureAwait(false);
                 return;
 
             case "navigate-to-route":
@@ -337,6 +352,133 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         });
     }
 
+    private async Task HandleProvidersAsync(JObject message, CancellationToken cancellationToken)
+    {
+        var requestId = message["requestId"]?.Value<string>();
+        var type = message["type"]?.Value<string>();
+        try
+        {
+            if (type != "providers-request")
+            {
+                await _processService.UpdateProvidersAsync(_viewModel.Settings, () =>
+                {
+                    var settings = _viewModel.Settings;
+                    var original = settings.Providers;
+                    var oldModel = settings.DefaultModel;
+                    var profiles = original.ToList();
+                    if (type == "providers-delete")
+                    {
+                        var id = message["id"]?.Value<string>();
+                        if (profiles.RemoveAll(p => p.Id == id) == 0)
+                            throw new ArgumentException("找不到要移除的服务，请刷新后重试。");
+                    }
+                    else
+                    {
+                        var input = message["provider"] as JObject ?? throw new ArgumentException("请填写服务配置。");
+                        var id = input["id"]?.Value<string>();
+                        var existing = profiles.FirstOrDefault(p => p.Id == id);
+                        if (!string.IsNullOrEmpty(id) && existing is null)
+                            throw new ArgumentException("找不到要修改的服务，请刷新后重试。");
+                        if (existing is null && profiles.Count >= 16) throw new ArgumentException("最多可配置 16 个服务。");
+                        var provider = new CodexProviderConfiguration
+                        {
+                            Id = existing?.Id ?? Guid.NewGuid().ToString("N"),
+                            Name = input["name"]?.Value<string>()?.Trim() ?? string.Empty,
+                            BaseUrl = input["baseUrl"]?.Value<string>()?.Trim() ?? string.Empty,
+                            ApiKey = input["apiKey"]?.Value<string>() ?? string.Empty,
+                            Models = (input["models"] as JArray ?? new JArray()).Values<string>()
+                                .Where(m => !string.IsNullOrWhiteSpace(m)).Select(m => m!.Trim()).Distinct(StringComparer.Ordinal).ToList()
+                        };
+                        if (string.IsNullOrEmpty(provider.ApiKey)) provider.ApiKey = existing?.ApiKey ?? string.Empty;
+                        // Editing the name/key or model list must preserve imported per-model capabilities.
+                        if (existing is not null && string.Equals(existing.BaseUrl, provider.BaseUrl, StringComparison.Ordinal))
+                        {
+                            if (existing.ReasoningEfforts is not null)
+                                provider.ReasoningEfforts = existing.ReasoningEfforts
+                                    .Where(pair => provider.Models.Contains(pair.Key) && pair.Value is not null)
+                                    .ToDictionary(pair => pair.Key, pair => pair.Value.ToList(), StringComparer.Ordinal);
+                            if (existing.DefaultReasoningEfforts is not null)
+                                provider.DefaultReasoningEfforts = existing.DefaultReasoningEfforts
+                                    .Where(pair => provider.Models.Contains(pair.Key))
+                                    .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+                            if (existing.ContextWindows is not null)
+                                provider.ContextWindows = existing.ContextWindows
+                                    .Where(pair => provider.Models.Contains(pair.Key))
+                                    .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+                        }
+                        CodexProviderConfigurationService.Validate(provider);
+                        if (profiles.Any(p => p.Id != provider.Id && string.Equals(p.Name, provider.Name, StringComparison.OrdinalIgnoreCase)))
+                            throw new ArgumentException("服务名称已存在，请使用不同的名称以便区分模型。");
+                        if (existing is null) profiles.Add(provider);
+                        else profiles[profiles.IndexOf(existing)] = provider;
+                    }
+                    try
+                    {
+                        settings.Providers = profiles;
+                        if (settings.DefaultModel.StartsWith(CodexProviderModelCatalog.AliasPrefix, StringComparison.Ordinal)
+                            && !profiles.Any(p => p.Models.Any(m => CodexProviderModelCatalog.Alias(p, m) == settings.DefaultModel)))
+                            settings.DefaultModel = string.Empty;
+                        _settingsStore.Save(settings, updateProviders: true);
+                    }
+                    catch
+                    {
+                        settings.Providers = original;
+                        settings.DefaultModel = oldModel;
+                        throw;
+                    }
+                }, cancellationToken).ConfigureAwait(false);
+            }
+            PostProvidersState(requestId, saved: type != "providers-request");
+        }
+        catch (ArgumentException ex) { PostProvidersState(requestId, error: ex.Message); }
+        catch (InvalidOperationException ex) { PostProvidersState(requestId, error: ex.Message); }
+        catch (Exception) { PostProvidersState(requestId, error: "服务配置未能保存，请检查本地设置文件是否可写，然后重试。"); }
+        finally
+        {
+            // Do not retain the submitted secret in the bridge's input object.
+            if (message["provider"] is JObject input) input.Remove("apiKey");
+        }
+    }
+
+    private void PostProvidersState(string? requestId = null, bool saved = false, string? error = null)
+    {
+        Post(new JObject
+        {
+            ["type"] = "providers-state", ["requestId"] = requestId,
+            ["saved"] = saved, ["error"] = error,
+            ["isBusy"] = _viewModel.IsBusy || _processService.HasActiveProviderWork,
+            ["providers"] = new JArray(_viewModel.Settings.Providers.Select(p => new JObject
+            {
+                ["id"] = p.Id, ["name"] = p.Name, ["baseUrl"] = p.BaseUrl,
+                ["models"] = new JArray(p.Models), ["hasApiKey"] = !string.IsNullOrEmpty(p.ApiKey)
+            }))
+        });
+    }
+
+    private void OnProvidersChanged() => _ = RefreshProviderQueriesAsync();
+
+    private async Task RefreshProviderQueriesAsync()
+    {
+        PostProvidersState();
+        try
+        {
+            // Publish the real authentication type, so adding a provider never looks like logout.
+            var account = await _processService.InvokeAppServerRequestAsync(_viewModel.Settings,
+                "account/read", new JObject { ["refreshToken"] = false }, CancellationToken.None).ConfigureAwait(false);
+            OnAppServerNotificationReceived("account/updated", new JObject
+            {
+                ["authMode"] = account?["account"]?["type"]?.DeepClone(),
+                ["planType"] = account?["account"]?["planType"]?.DeepClone()
+            });
+        }
+        catch { /* Saved configuration remains available; the normal connection UI reports startup errors. */ }
+        foreach (var key in new[] { new JArray("models", "list"), new JArray("user-saved-config"), new JArray("config") })
+        {
+            Post(CreateQueryInvalidationNotification(key));
+            _broadcastQueryInvalidation?.Invoke(key);
+        }
+    }
+
     private void SetDiagnosticLogging(bool enabled)
     {
         if (_viewModel.Settings.EnableDiagnosticLogging != enabled)
@@ -359,6 +501,48 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         });
     }
 
+    private async Task HandleProjectSettingsAsync(string type, CancellationToken cancellationToken)
+    {
+        await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (_disposed)
+        {
+            return;
+        }
+
+        var command = type == "project-settings-choose-directory"
+            ? _viewModel.ChooseWorkingDirectoryCommand
+            : type == "project-settings-use-solution-directory"
+                ? _viewModel.UseSolutionDirectoryCommand
+                : null;
+        if (command?.CanExecute(null) == true)
+        {
+            command.Execute(null);
+        }
+
+        PostProjectSettingsState();
+    }
+
+    private void OnProjectSettingsPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (_isSettingsSurface && (e.PropertyName == nameof(CodexToolWindowViewModel.IsBusy)
+            || e.PropertyName == nameof(CodexToolWindowViewModel.Settings)
+            || e.PropertyName == nameof(CodexToolWindowViewModel.WorkspaceDirectory)))
+        {
+            PostProjectSettingsState();
+        }
+    }
+
+    private void PostProjectSettingsState()
+    {
+        Post(new JObject
+        {
+            ["type"] = "project-settings-state",
+            ["directory"] = _viewModel.WorkspaceDirectory,
+            ["followSolutionDirectory"] = _viewModel.Settings.FollowSolutionDirectory,
+            ["isBusy"] = _viewModel.IsBusy
+        });
+    }
+
     private void OnWorkingDirectoryChanged(object? sender, EventArgs e)
     {
         // The frozen composer can retain an IDE prefill or a prewarmed thread from
@@ -369,6 +553,8 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
             _workspaceDirectory, selectedDirectory, (prefill as JObject)?["cwd"]?.Value<string>());
         _workspaceDirectory = selectedDirectory;
         Post(new JObject { ["type"] = "active-workspace-roots-updated" });
+        Post(CreateQueryInvalidationNotification(new JArray("recent-conversations")));
+        Post(CreateQueryInvalidationNotification(new JArray("recent-conversations-meta")));
         if (_isSettingsSurface)
         {
             return;
@@ -519,6 +705,21 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
 
             case "get-settings":
                 return new JObject { ["values"] = BuildSettingsValues() };
+
+            case "codex-agents-md":
+            case "codex-agents-md-save": {
+                var environmentVariables = _viewModel.Settings.EnvironmentVariables;
+                var result = await Task.Run(
+                    () => CodexUserInstructionsStore.HandleRequest(method, values, environmentVariables),
+                    cancellationToken).ConfigureAwait(false);
+                if (method == "codex-agents-md-save")
+                {
+                    var key = new JArray("vscode", "codex-agents-md");
+                    Post(CreateQueryInvalidationNotification(key));
+                    _broadcastQueryInvalidation?.Invoke(key);
+                }
+                return result;
+            }
 
             case "get-setting":
                 return new JObject { ["value"] = ReadSetting(ExtractKey(values)) };
@@ -1056,12 +1257,12 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         JToken? parameters,
         CancellationToken cancellationToken)
     {
-        var preparedParameters = _workspaceRequests.PrepareRequest(method, parameters, ResolveWorkingDirectory());
-        var enrichedParameters = CodexRuntimeIdentityContext.EnrichRequest(
-            method,
-            preparedParameters,
-            _viewModel.Settings.DefaultModel,
-            _viewModel.Settings.ReasoningEffort);
+        var workingDirectory = ResolveWorkingDirectory();
+        var preparedParameters = method == "thread/list"
+            ? PrepareWorkspaceHistoryParams(parameters, workingDirectory)
+            : _workspaceRequests.PrepareRequest(method, parameters, workingDirectory);
+        // Provider aliases must be resolved before runtime identity instructions are generated.
+        var enrichedParameters = preparedParameters;
         await _historyWindowController.WaitForCapacityAsync(method, enrichedParameters, cancellationToken).ConfigureAwait(false);
         try
         {
@@ -1071,6 +1272,12 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
                 enrichedParameters,
                 cancellationToken).ConfigureAwait(false);
             _workspaceRequests.ObserveResponse(method, parameters, preparedParameters, result);
+            if (method == "thread/list")
+            {
+                // A folder change can overtake an in-flight list request. Never publish
+                // rows (or a continuation cursor) belonging to the previous folder.
+                result = FilterWorkspaceHistoryResult(result, workingDirectory, ResolveWorkingDirectory());
+            }
             var limitedResult = _payloadLimiter.LimitAppServerResult(method, result);
             _historyWindowController.ObserveResponse(method, enrichedParameters, limitedResult);
             return limitedResult;
@@ -1079,6 +1286,10 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         {
             _historyWindowController.ObserveFailure(method, enrichedParameters);
             throw;
+        }
+        finally
+        {
+            if (method == "turn/start" || method == "review/start" || method == "thread/compact/start") PostProvidersState();
         }
     }
 
@@ -1131,7 +1342,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         {
             var result = await InvokeAppServerForWebViewAsync(
                 "thread/list",
-                BuildRecentConversationRefreshParams(new JObject()),
+                BuildRecentConversationRefreshParams(message),
                 cancellationToken).ConfigureAwait(false);
             var response = BuildRecentHistoryResponse(result);
             response["type"] = "recent-history-response";
@@ -1147,6 +1358,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
                 ["requestId"] = requestId is null ? JValue.CreateNull() : requestId,
                 ["items"] = new JArray(),
                 ["hasMore"] = false,
+                ["nextCursor"] = JValue.CreateNull(),
                 ["error"] = "LOCAL_HISTORY_UNAVAILABLE"
             });
         }
@@ -1850,6 +2062,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         }
 
         _autoCompactionCoordinator.ObserveNotification(method, parameters);
+        if (method == "turn/started" || method == "turn/completed" || method == "thread/closed") PostProvidersState();
         parameters = _appServerRequestRelay.TransformNotificationParameters(method, parameters);
         if (!_payloadLimiter.TryLimitNotification(method, parameters, out var limitedParameters))
         {
@@ -1937,11 +2150,61 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         return new JObject
         {
             ["archived"] = false,
-            ["cursor"] = JValue.CreateNull(),
+            ["cursor"] = values["cursor"]?.Type == JTokenType.String
+                ? values["cursor"]!.DeepClone() : JValue.CreateNull(),
             ["limit"] = 50,
-            ["modelProviders"] = JValue.CreateNull(),
+            ["modelProviders"] = new JArray(),
             ["sortKey"] = values["sortKey"]?.Value<string>() ?? "updated_at"
         };
+    }
+
+    internal static JObject PrepareWorkspaceHistoryParams(JToken? parameters, string workingDirectory)
+    {
+        var request = parameters?.DeepClone() as JObject ?? new JObject();
+        var directory = CodexProcessService.NormalizeComparablePath(CodexWorkingDirectory.Resolve(workingDirectory));
+        // CLI sessions may store either the normal Windows path or its extended form.
+        // Ask the server to filter before pagination, rather than filtering a global page.
+        var directories = new JArray(directory);
+        if (directory.StartsWith(@"\\", StringComparison.Ordinal))
+            directories.Add(@"\\?\UNC\" + directory.Substring(2));
+        else if (directory.Length >= 3 && directory[1] == ':')
+            directories.Add(@"\\?\" + directory);
+        request["cwd"] = directories;
+        // A profile selects runtime configuration, not a separate history scope.
+        // Ignore stale UI provider/source filters so CLI and IDE sessions stay visible.
+        request["modelProviders"] = new JArray();
+        request["sourceKinds"] = new JArray();
+        return request;
+    }
+
+    internal static JObject FilterWorkspaceHistoryResult(JToken? result, string requestedDirectory, string currentDirectory)
+    {
+        var response = NormalizeAppServerResult("thread/list", result) as JObject ?? new JObject();
+        var requested = CodexProcessService.NormalizeComparablePath(requestedDirectory);
+        var current = CodexProcessService.NormalizeComparablePath(currentDirectory);
+        var directoryChanged = !string.Equals(requested, current, StringComparison.OrdinalIgnoreCase);
+        var rows = response["data"] as JArray ?? new JArray();
+        var filtered = new JArray();
+        if (!directoryChanged)
+        {
+            foreach (var row in rows.OfType<JObject>())
+            {
+                var cwd = row["cwd"];
+                if (cwd?.Type == JTokenType.String && !string.IsNullOrWhiteSpace(cwd.Value<string>())
+                    && string.Equals(CodexProcessService.NormalizeComparablePath(cwd.Value<string>()),
+                        current, StringComparison.OrdinalIgnoreCase))
+                    filtered.Add(row.DeepClone());
+            }
+        }
+        response["data"] = filtered;
+        response["threads"] = filtered.DeepClone();
+        response["conversations"] = filtered.DeepClone();
+        if (directoryChanged)
+        {
+            response["nextCursor"] = JValue.CreateNull();
+            response["cursor"] = JValue.CreateNull();
+        }
+        return response;
     }
 
     internal static JObject BuildRecentHistoryResponse(JToken? result)
@@ -1985,6 +2248,9 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         return new JObject
         {
             ["items"] = items,
+            ["nextCursor"] = nextCursor?.Type == JTokenType.String
+                && !string.IsNullOrWhiteSpace(nextCursor.Value<string>())
+                    ? nextCursor.DeepClone() : JValue.CreateNull(),
             ["hasMore"] = nextCursor is not null
                 && nextCursor.Type != JTokenType.Null
                 && !string.IsNullOrWhiteSpace(nextCursor.Value<string>())
@@ -2336,6 +2602,8 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         _autoCompactionCoordinator.Dispose();
         _appServerRequestRelay.Dispose();
         _processService.AppServerNotificationReceived -= OnAppServerNotificationReceived;
+        _processService.ProvidersChanged -= OnProvidersChanged;
         _viewModel.WorkingDirectoryChanged -= OnWorkingDirectoryChanged;
+        _viewModel.PropertyChanged -= OnProjectSettingsPropertyChanged;
     }
 }

@@ -77,7 +77,7 @@ public sealed class ExtensionSettingsStore
         }
     }
 
-    public void Save(CodexExtensionSettings settings, bool mergePromptHistory = true)
+    public void Save(CodexExtensionSettings settings, bool mergePromptHistory = true, bool updateProviders = false)
     {
         if (settings is null)
         {
@@ -93,6 +93,7 @@ public sealed class ExtensionSettingsStore
 
         try
         {
+            var hadStoredSettings = File.Exists(_settingsFile);
             CodexExtensionSettings? existing = null;
             try
             {
@@ -107,6 +108,12 @@ public sealed class ExtensionSettingsStore
             if (mergePromptHistory && existing is not null)
             {
                 MergePromptHistory(settings, existing);
+            }
+            // Background/history saves from another VS instance must not erase newly saved keys.
+            // Only the provider editor explicitly replaces this protected collection.
+            if (!updateProviders && hadStoredSettings && existing is not null)
+            {
+                settings.Providers = existing.Providers;
             }
 
             var json = SerializeForStorage(settings);
@@ -134,6 +141,7 @@ public sealed class ExtensionSettingsStore
             settings.EnvironmentVariables = sensitive.EnvironmentVariables;
             settings.RawTomlOverrides = sensitive.RawTomlOverrides;
             settings.AdditionalArguments = sensitive.AdditionalArguments;
+            settings.Providers = sensitive.Providers;
             if (root[nameof(CodexExtensionSettings.PromptHistory)] is null)
             {
                 settings.PromptHistory = sensitive.PromptHistory;
@@ -150,12 +158,14 @@ public sealed class ExtensionSettingsStore
         root.Remove(nameof(CodexExtensionSettings.RawTomlOverrides));
         root.Remove(nameof(CodexExtensionSettings.AdditionalArguments));
         root.Remove(nameof(CodexExtensionSettings.PromptHistory));
+        root.Remove(nameof(CodexExtensionSettings.Providers));
         root[ProtectedSettingsProperty] = ProtectSensitiveSettings(new SensitiveSettings
         {
             EnvironmentVariables = settings.EnvironmentVariables ?? string.Empty,
             RawTomlOverrides = settings.RawTomlOverrides ?? string.Empty,
             AdditionalArguments = settings.AdditionalArguments ?? string.Empty,
-            PromptHistory = settings.PromptHistory ?? new List<string>()
+            PromptHistory = settings.PromptHistory ?? new List<string>(),
+            Providers = settings.Providers ?? new List<CodexProviderConfiguration>()
         });
         return NewtonsoftJsonCompatibility.Serialize(root, Formatting.Indented);
     }
@@ -247,6 +257,18 @@ public sealed class ExtensionSettingsStore
         settings.CurrentThreadId ??= string.Empty;
         settings.LastThreadWorkingDirectory ??= string.Empty;
         settings.CustomModels ??= new List<string>();
+        settings.Providers ??= new List<CodexProviderConfiguration>();
+        settings.Providers = settings.Providers.Where(provider => provider is not null).ToList();
+        foreach (var provider in settings.Providers)
+        {
+            // Keep invalid identities intact so validation can report them; never
+            // silently assign a different provider to an existing model selection.
+            provider.Id ??= string.Empty;
+            provider.Name ??= string.Empty;
+            provider.BaseUrl ??= string.Empty;
+            provider.ApiKey ??= string.Empty;
+            provider.Models ??= new List<string>();
+        }
         settings.CustomReasoningEfforts ??= new List<string>();
         settings.CustomVerbosityOptions ??= new List<string>();
         settings.CustomServiceTiers ??= new List<string>();
@@ -309,6 +331,8 @@ public sealed class ExtensionSettingsStore
         public string AdditionalArguments { get; set; } = string.Empty;
 
         public List<string> PromptHistory { get; set; } = new();
+
+        public List<CodexProviderConfiguration> Providers { get; set; } = new();
     }
 }
 

@@ -4,6 +4,7 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:themes="clr-namespace:Microsoft.VisualStudio.PlatformUI;assembly=Microsoft.VisualStudio.Shell.15.0"
+             xmlns:ui="clr-namespace:CodexVsix.UI"
              mc:Ignorable="d"
              Loaded="OnLoaded"
              FontFamily="Segoe UI"
@@ -281,6 +282,9 @@
     <Grid Background="{StaticResource WindowBrush}">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
             <StackPanel Margin="20">
+                <TextBlock Margin="0,0,0,12" Foreground="{StaticResource TextPrimaryBrush}"
+                           FontSize="16" FontWeight="SemiBold" Text="项目设置" />
+                <ui:CodexWorkspaceSelector Margin="-12,0,-12,12" />
                 <Button x:Name="RetryModernInterfaceButton"
                         Margin="0,0,0,16"
                         HorizontalAlignment="Left"

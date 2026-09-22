@@ -16,6 +16,8 @@ public sealed class CodexOfficialWebViewShellTests
         Assert.True(File.Exists(Path.Combine(resourceRoot, "codex-acquire-vscode-api-shim.js")));
         Assert.True(File.Exists(Path.Combine(resourceRoot, "codex-visual-studio-history-guard.js")));
         Assert.True(File.Exists(Path.Combine(resourceRoot, "codex-visual-studio-diagnostics.js")));
+        Assert.True(File.Exists(Path.Combine(resourceRoot, "vsai-project-settings.js")));
+        Assert.True(File.Exists(Path.Combine(resourceRoot, "vsai-providers.js")));
         var theme = CodexVisualStudioTheme.Create(
             "test-dark",
             "dark",
@@ -54,6 +56,9 @@ public sealed class CodexOfficialWebViewShellTests
         Assert.Contains("console-error:", html);
         Assert.Contains("diagnostic-settings-request", html);
         Assert.Contains("codex-vs-diagnostics-setting", html);
+        Assert.Contains("vsai-project-settings-content", html);
+        Assert.Contains("project-settings-choose-directory", html);
+        Assert.Contains("providers-save", html);
         Assert.Contains("normalized === '/settings/general-settings'", html);
         Assert.Contains("!diagnosticLoggingEnabled", html);
         Assert.DoesNotContain("PROD_BASE_TAG_HERE", html);

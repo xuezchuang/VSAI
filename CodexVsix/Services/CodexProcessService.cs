@@ -55,6 +55,10 @@ public sealed class CodexProcessService : IDisposable
 
     private readonly SemaphoreSlim _executionGate = new(1, 1);
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
+    private readonly SemaphoreSlim _providerGate = new(1, 1);
+    private readonly CodexProviderSessionRouter _providerRouter = new(settings => new ExtensionSettingsStore().Save(settings));
+    private CodexExtensionSettings _providerSettings = new();
+    private readonly HashSet<string> _providerSecrets = new(StringComparer.Ordinal);
     private readonly object _syncRoot = new();
     private readonly object _writeLock = new();
     private readonly Dictionary<long, PendingRequest> _pendingRequests = new();
@@ -82,6 +86,8 @@ public sealed class CodexProcessService : IDisposable
     public event Action? ThreadCatalogChanged;
     public event Action<CodexRateLimitSummary>? RateLimitsUpdated;
     public event Action? AccountUpdated;
+    internal event Action? ProvidersChanged;
+    internal bool HasActiveProviderWork => _providerRouter.IsBusy || _activeTurn is not null;
 
     public CodexProcessService()
         : this(CodexDiagnosticLogger.Shared)
@@ -115,9 +121,68 @@ public sealed class CodexProcessService : IDisposable
             throw new ArgumentException("An app-server method is required.", nameof(method));
         }
 
-        var workingDirectory = ResolveWorkingDirectory(settings.WorkingDirectory);
-        await EnsureServerReadyAsync(settings, workingDirectory, cancellationToken).ConfigureAwait(false);
-        return await SendRequestAsync(method, parameters, cancellationToken).ConfigureAwait(false);
+        await _providerGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var workingDirectory = ResolveWorkingDirectory(settings.WorkingDirectory);
+            await EnsureServerReadyAsync(settings, workingDirectory, cancellationToken).ConfigureAwait(false);
+            return await InvokeProviderRequestAsync(settings, method, parameters, cancellationToken).ConfigureAwait(false);
+        }
+        finally { _providerGate.Release(); }
+    }
+
+    private Task<JToken?> InvokeProviderRequestAsync(CodexExtensionSettings settings, string method, JToken? parameters, CancellationToken token)
+        => _providerRouter.InvokeAsync(settings, method, parameters,
+            (rpcMethod, values, ct) => SendRequestAsync(rpcMethod, values, ct),
+            async ct =>
+            {
+                await _lifecycleGate.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    ThrowIfProviderChangeUnsafe();
+                    await StopIdleProviderServerAsync(ct).ConfigureAwait(false);
+                }
+                finally { _lifecycleGate.Release(); }
+                await EnsureServerReadyAsync(settings, ResolveWorkingDirectory(settings.WorkingDirectory), ct).ConfigureAwait(false);
+            }, token);
+
+    internal async Task UpdateProvidersAsync(CodexExtensionSettings settings, Action update, CancellationToken token)
+    {
+        await _providerGate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            ThrowIfProviderChangeUnsafe();
+            update();
+        }
+        finally { _providerGate.Release(); }
+        ProvidersChanged?.Invoke();
+    }
+
+    private void ThrowIfProviderChangeUnsafe()
+    {
+        lock (_syncRoot)
+            if (_activeTurn is not null || _providerRouter.IsBusy || _pendingRequests.Count > 0)
+                throw new InvalidOperationException("仍有任务或请求正在运行，请等待完成后再更改服务。");
+    }
+
+    private async Task StopIdleProviderServerAsync(CancellationToken token)
+    {
+        ThrowIfProviderChangeUnsafe();
+        Process? process;
+        lock (_syncRoot) process = _serverProcess;
+        if (process is not null && !process.HasExited)
+        {
+            await _providerRouter.CaptureLoadedThreadSettingsAsync(
+                (method, values, ct) => SendRequestAsync(method, values, ct), token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            // EOF allows Codex to flush its rollout before another provider resumes the thread.
+            process.StandardInput.Close();
+            var exited = await Task.Run(() => process.WaitForExit(5000)).ConfigureAwait(false);
+            RestartServer(clearConfig: false);
+            if (!exited) throw new InvalidOperationException("Codex 未能正常结束，尚未切换服务或发送消息，请重新打开会话后重试。");
+            token.ThrowIfCancellationRequested();
+        }
+        else RestartServer(clearConfig: false);
     }
 
     [SuppressMessage("Usage", "VSTHRD003:Avoid awaiting foreign Tasks", Justification = "The completion source uses RunContinuationsAsynchronously and never depends on the Visual Studio UI context.")]
@@ -133,9 +198,12 @@ public sealed class CodexProcessService : IDisposable
         CancellationToken cancellationToken)
     {
         await _executionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var providerGateHeld = false;
 
         try
         {
+            await _providerGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            providerGateHeld = true;
             var workingDirectory = ResolveWorkingDirectory(settings.WorkingDirectory);
             await EnsureServerReadyAsync(settings, workingDirectory, cancellationToken).ConfigureAwait(false);
             await EnsureThreadReadyAsync(settings, workingDirectory, settings.CurrentThreadId, cancellationToken).ConfigureAwait(false);
@@ -164,6 +232,8 @@ public sealed class CodexProcessService : IDisposable
                         cancellationToken).ConfigureAwait(false);
 
                     turnState.TurnId = turnResult?["turn"]?["id"]?.Value<string>();
+                    _providerGate.Release();
+                    providerGateHeld = false;
                     var exitCode = await turnState.Completion.Task.ConfigureAwait(false);
                     cancellationToken.ThrowIfCancellationRequested();
                     return exitCode;
@@ -187,6 +257,7 @@ public sealed class CodexProcessService : IDisposable
         }
         finally
         {
+            if (providerGateHeld) _providerGate.Release();
             _executionGate.Release();
         }
     }
@@ -202,6 +273,7 @@ public sealed class CodexProcessService : IDisposable
         RestartServer(clearConfig: true);
         _executionGate.Dispose();
         _lifecycleGate.Dispose();
+        _providerGate.Dispose();
     }
 
     public void ResetThread()
@@ -379,7 +451,8 @@ public sealed class CodexProcessService : IDisposable
         {
             ["limit"] = limit,
             ["archived"] = false,
-            ["sortKey"] = "updated_at"
+            ["sortKey"] = "updated_at",
+            ["modelProviders"] = new JArray()
         };
 
         if (!string.IsNullOrWhiteSpace(workingDirectory))
@@ -459,26 +532,23 @@ public sealed class CodexProcessService : IDisposable
     {
         try
         {
-            return await SendRequestAsync(
+            return await InvokeAppServerRequestAsync(settings,
                 "thread/resume",
-                BuildThreadResumeParams(threadId, settings, workingDirectory, includeInitialTurnsPage: true),
+                ConvertParameters(BuildThreadResumeParams(threadId, settings, workingDirectory, includeInitialTurnsPage: true)),
                 cancellationToken).ConfigureAwait(false);
         }
         catch (CodexAppServerException ex) when (ex.IsCompatibilityError)
         {
-            return await SendRequestAsync(
+            return await InvokeAppServerRequestAsync(settings,
                 "thread/resume",
-                BuildThreadResumeParams(threadId, settings, workingDirectory),
+                ConvertParameters(BuildThreadResumeParams(threadId, settings, workingDirectory)),
                 cancellationToken).ConfigureAwait(false);
         }
     }
 
     public async Task<IReadOnlyList<CodexModelOption>> ListModelsAsync(CodexExtensionSettings settings, CancellationToken cancellationToken, bool includeHidden = false)
     {
-        var workingDirectory = ResolveWorkingDirectory(settings.WorkingDirectory);
-        await EnsureServerReadyAsync(settings, workingDirectory, cancellationToken).ConfigureAwait(false);
-
-        var response = await SendRequestAsync("model/list", new { }, cancellationToken).ConfigureAwait(false);
+        var response = await InvokeAppServerRequestAsync(settings, "model/list", new JObject(), cancellationToken).ConfigureAwait(false);
         return CodexModelCatalog.ParseModelListResponse(response, includeHidden);
     }
 
@@ -930,6 +1000,7 @@ public sealed class CodexProcessService : IDisposable
         try
         {
             _languageOverride = settings.LanguageOverride;
+            _providerSettings = settings;
             var desiredServerConfig = BuildServerConfigKey(settings);
             Task? initializedTask = null;
             var isReady = false;
@@ -955,6 +1026,11 @@ public sealed class CodexProcessService : IDisposable
                 return;
             }
 
+            if (_serverProcess is not null && !_serverProcess.HasExited)
+            {
+                ThrowIfProviderChangeUnsafe();
+                await StopIdleProviderServerAsync(cancellationToken).ConfigureAwait(false);
+            }
             RestartServer(clearConfig: false);
             lock (_syncRoot)
             {
@@ -1022,9 +1098,9 @@ public sealed class CodexProcessService : IDisposable
                 return;
             }
 
-            var resumed = await SendRequestAsync(
+            var resumed = await InvokeProviderRequestAsync(settings,
                 "thread/resume",
-                BuildThreadResumeParams(requestedThreadId!, settings, workingDirectory),
+                ConvertParameters(BuildThreadResumeParams(requestedThreadId!, settings, workingDirectory)),
                 cancellationToken).ConfigureAwait(false);
 
             lock (_syncRoot)
@@ -1042,9 +1118,9 @@ public sealed class CodexProcessService : IDisposable
             return;
         }
 
-        var result = await SendRequestAsync(
+        var result = await InvokeProviderRequestAsync(settings,
             "thread/start",
-            BuildThreadStartParams(settings, workingDirectory),
+            ConvertParameters(BuildThreadStartParams(settings, workingDirectory)),
             cancellationToken).ConfigureAwait(false);
 
         lock (_syncRoot)
@@ -1136,6 +1212,11 @@ public sealed class CodexProcessService : IDisposable
         };
 
         ApplyEnvironmentVariables(psi, settings.EnvironmentVariables);
+        foreach (var provider in settings.Providers)
+        {
+            CodexProviderConfigurationService.ApplyEnvironment(psi, provider);
+            lock (_syncRoot) _providerSecrets.Add(provider.ApiKey);
+        }
 
         var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
         process.Start();
@@ -1214,6 +1295,7 @@ public sealed class CodexProcessService : IDisposable
                 var line = await process.StandardError.ReadLineAsync().ConfigureAwait(false);
                 if (line is not null)
                 {
+                    line = RedactProviderSecrets(line);
                     _diagnostics.Write(
                         "appserver.stderr",
                         new JObject
@@ -1306,7 +1388,11 @@ public sealed class CodexProcessService : IDisposable
             return;
         }
 
-        HandleNotification(message);
+        lock (_syncRoot)
+        {
+            // Do not let a notification from the old process alter a resumed thread's state.
+            if (_serverGeneration == generation) HandleNotification(message);
+        }
     }
 
     private void ResolvePendingRequest(JObject message)
@@ -1333,7 +1419,7 @@ public sealed class CodexProcessService : IDisposable
             && error.Type != JTokenType.Null
             && error.Type != JTokenType.Undefined)
         {
-            var errorMessage = ExtractAppServerErrorMessage(error, GetLocalization().AppServerRequestFailed);
+            var errorMessage = RedactProviderSecrets(ExtractAppServerErrorMessage(error, GetLocalization().AppServerRequestFailed));
             var errorCode = ExtractAppServerErrorCode(error);
             _diagnostics.Write(
                 "appserver.response.error",
@@ -1503,10 +1589,11 @@ public sealed class CodexProcessService : IDisposable
     {
         var method = message["method"]?.Value<string>() ?? string.Empty;
         var parameters = message["params"] as JObject;
+        _providerRouter.ObserveNotification(method, parameters);
 
         try
         {
-            AppServerNotificationReceived?.Invoke(method, parameters?.DeepClone());
+            AppServerNotificationReceived?.Invoke(method, _providerRouter.TransformNotification(_providerSettings, method, parameters?.DeepClone()));
         }
         catch (Exception ex)
         {
@@ -2225,7 +2312,7 @@ public sealed class CodexProcessService : IDisposable
                     ideContextSummary,
                     attempt.IncludeExecutionOverrides,
                     attempt.IncludeCollaborationMode);
-                return await SendRequestAsync("turn/start", requestParams, cancellationToken).ConfigureAwait(false);
+                return await InvokeProviderRequestAsync(settings, "turn/start", requestParams, cancellationToken).ConfigureAwait(false);
             }
             catch (CodexAppServerException ex) when (ex.IsCompatibilityError)
             {
@@ -2272,7 +2359,7 @@ public sealed class CodexProcessService : IDisposable
 
         try
         {
-            var response = await SendRequestAsync(
+            var response = await InvokeProviderRequestAsync(settings,
                 "review/start",
                 new JObject
                 {
@@ -4677,11 +4764,20 @@ public sealed class CodexProcessService : IDisposable
             turnState = _activeTurn;
         }
 
-        turnState?.OnError(text);
+        turnState?.OnError(RedactProviderSecrets(text));
+    }
+
+    private string RedactProviderSecrets(string value)
+    {
+        lock (_syncRoot)
+            foreach (var secret in _providerSecrets)
+                if (!string.IsNullOrEmpty(secret)) value = value.Replace(secret, "[redacted]");
+        return value;
     }
 
     private void FailPendingOperations(Process process, long generation, string message)
     {
+        message = RedactProviderSecrets(message);
         List<TaskCompletionSource<JToken?>> pendingRequests;
         ActiveTurnState? turnState;
         StreamWriter? input;
@@ -4706,6 +4802,7 @@ public sealed class CodexProcessService : IDisposable
             turnState = _activeTurn;
             _activeTurn = null;
             ++_serverGeneration;
+            _providerRouter.ServerStopped();
             input = _serverInput;
             _threadId = null;
             _threadConfigKey = null;
@@ -4782,6 +4879,7 @@ public sealed class CodexProcessService : IDisposable
             {
                 _serverConfigKey = null;
             }
+            _providerRouter.ServerStopped();
         }
 
         turnState?.TrySetResult(1);
@@ -5270,7 +5368,7 @@ public sealed class CodexProcessService : IDisposable
 
     private static string BuildServerArguments(CodexExtensionSettings settings)
     {
-        return CodexAppServerCommandLine.Build(settings);
+        return CodexAppServerCommandLine.Build(settings, CodexProviderModelCatalogRuntime.Prepare(settings));
     }
 
     private static string BuildServerConfigKey(CodexExtensionSettings settings)
@@ -5284,7 +5382,9 @@ public sealed class CodexProcessService : IDisposable
             settings.Profile ?? string.Empty,
             string.Join("\n", CodexAppServerCommandLine.BuildConfigOverrides(settings)),
             settings.AdditionalArguments ?? string.Empty,
-            settings.EnvironmentVariables ?? string.Empty
+            settings.EnvironmentVariables ?? string.Empty,
+            CodexProviderModelCatalogRuntime.GetSettingsKey(settings),
+            string.Join("\n", settings.Providers.Select(provider => provider.Id + "\0" + provider.ApiKey))
         });
     }
 

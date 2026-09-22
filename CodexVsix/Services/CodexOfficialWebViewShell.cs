@@ -69,16 +69,22 @@ internal static class CodexOfficialWebViewShell
         string locale,
         CodexVisualStudioTheme theme,
         string? initialRoute = null,
-        bool diagnosticLoggingEnabled = false)
+        bool diagnosticLoggingEnabled = false,
+        bool isSettingsSurface = false,
+        string? compatibilityDirectory = null)
     {
         var indexPath = Path.Combine(resourceRoot, "webview", "index.html");
         var shimPath = Path.Combine(resourceRoot, "codex-acquire-vscode-api-shim.js");
         var historyGuardPath = Path.Combine(resourceRoot, "codex-visual-studio-history-guard.js");
         var diagnosticsPath = Path.Combine(resourceRoot, "codex-visual-studio-diagnostics.js");
+        var projectSettingsPath = Path.Combine(resourceRoot, "vsai-project-settings.js");
+        var providersPath = Path.Combine(resourceRoot, "vsai-providers.js");
         if (!File.Exists(indexPath)
             || !File.Exists(shimPath)
             || !File.Exists(historyGuardPath)
-            || !File.Exists(diagnosticsPath))
+            || !File.Exists(diagnosticsPath)
+            || !File.Exists(projectSettingsPath)
+            || !File.Exists(providersPath))
         {
             var missingPath = !File.Exists(indexPath)
                 ? indexPath
@@ -86,7 +92,11 @@ internal static class CodexOfficialWebViewShell
                     ? shimPath
                     : !File.Exists(historyGuardPath)
                         ? historyGuardPath
-                        : diagnosticsPath;
+                        : !File.Exists(diagnosticsPath)
+                            ? diagnosticsPath
+                            : !File.Exists(projectSettingsPath)
+                                ? projectSettingsPath
+                                : providersPath;
             throw new FileNotFoundException("The bundled Codex webview is incomplete.", missingPath);
         }
 
@@ -103,6 +113,14 @@ internal static class CodexOfficialWebViewShell
                 AssetHostName,
                 match.Groups[3].Value));
         html = AppendWebviewIdToModuleEntrypoint(html, webviewId);
+        if (compatibilityDirectory != null)
+        {
+            var importMap = CodexReasoningEffortWebViewCompatibility.CreateImportMap(
+                resourceRoot, compatibilityDirectory, webviewId);
+            // Import maps must precede every module and modulepreload in the document.
+            html = Regex.Replace(html, "<head\\b[^>]*>",
+                match => match.Value + "\n" + importMap, RegexOptions.IgnoreCase);
+        }
         html = Regex.Replace(
             html,
             "<html\\s+lang=([\"'])[^\"']*\\1",
@@ -113,6 +131,7 @@ internal static class CodexOfficialWebViewShell
             + "<meta name=\"codex-session-id\" content=\"vs-" + WebUtility.HtmlEncode(webviewId) + "\">\n"
             + "<meta name=\"codex-build-flavor\" content=\"prod\">\n"
             + "<meta name=\"codex-view-kind\" content=\"sidebar\">\n"
+            + "<meta name=\"vsai-settings-surface\" content=\"" + (isSettingsSurface ? "true" : "false") + "\">\n"
             + "<meta name=\"codex-diagnostic-logging-enabled\" content=\""
             + (diagnosticLoggingEnabled ? "true" : "false")
             + "\">\n"
@@ -126,12 +145,16 @@ internal static class CodexOfficialWebViewShell
         var shim = AdaptShimForWebView2(File.ReadAllText(shimPath));
         var historyGuard = File.ReadAllText(historyGuardPath);
         var diagnostics = File.ReadAllText(diagnosticsPath);
+        var projectSettings = File.ReadAllText(projectSettingsPath);
+        var providers = File.ReadAllText(providersPath);
         var injection = "<style>" + theme.ToCss() + "</style>\n"
             + ThemeAdapter + "\n"
             + WebView2TransportAdapter + "\n"
             + "<script>" + shim + "</script>\n"
             + "<script>" + historyGuard + "</script>\n"
-            + "<script>" + diagnostics + "</script>\n";
+            + "<script>" + diagnostics + "</script>\n"
+            + "<script>" + projectSettings + "</script>\n"
+            + "<script>" + providers + "</script>\n";
         html = Regex.Replace(
             html,
             "(<script\\b(?=[^>]*\\btype=([\"'])module\\2)[^>]*>)",

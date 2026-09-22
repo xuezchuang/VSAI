@@ -13,7 +13,7 @@ namespace CodexVsix.Services;
 /// </summary>
 internal static class CodexAppServerCommandLine
 {
-    internal static string Build(CodexExtensionSettings settings)
+    internal static string Build(CodexExtensionSettings settings, string? modelCatalogPath = null)
     {
         if (settings is null)
         {
@@ -28,7 +28,7 @@ internal static class CodexAppServerCommandLine
             args.Add(settings.Profile.Trim());
         }
 
-        foreach (var value in BuildConfigOverrides(settings))
+        foreach (var value in BuildConfigOverridesCore(settings, includeProviders: false))
         {
             args.Add("-c");
             args.Add(value);
@@ -39,10 +39,23 @@ internal static class CodexAppServerCommandLine
             args.AddRange(SplitArguments(settings.AdditionalArguments));
         }
 
+        foreach (var value in BuildProviderOverrides(settings))
+        {
+            args.Add("-c");
+            args.Add(value);
+        }
+        if (!string.IsNullOrWhiteSpace(modelCatalogPath))
+        {
+            args.Add("-c");
+            args.Add("model_catalog_json=" + EncodeTomlString(modelCatalogPath!));
+        }
         return JoinArguments(args);
     }
 
     internal static IReadOnlyList<string> BuildConfigOverrides(CodexExtensionSettings settings)
+        => BuildConfigOverridesCore(settings, includeProviders: true);
+
+    private static IReadOnlyList<string> BuildConfigOverridesCore(CodexExtensionSettings settings, bool includeProviders)
     {
         if (settings is null)
         {
@@ -68,6 +81,23 @@ internal static class CodexAppServerCommandLine
                     values.Add(candidate);
                 }
             }
+        }
+
+        if (includeProviders) values.AddRange(BuildProviderOverrides(settings));
+        return values;
+    }
+
+    private static IReadOnlyList<string> BuildProviderOverrides(CodexExtensionSettings settings)
+    {
+        var values = new List<string>();
+        foreach (var provider in settings.Providers)
+        {
+            values.AddRange(CodexProviderConfigurationService.BuildConfigOverrides(provider));
+        }
+        if (settings.Providers.Count > 0)
+        {
+            // Keep account/model discovery on OpenAI. Custom providers are selected per thread.
+            values.Add("model_provider=\"openai\"");
         }
 
         return values;

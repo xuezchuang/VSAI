@@ -90,7 +90,9 @@
             historyUntitled: 'New conversation',
             historyLocalSingular: 'local conversation',
             historyLocalPlural: 'local conversations',
-            historyLimited: 'Showing the 50 most recent conversations.'
+            historyMoreAvailable: 'More conversations are available.',
+            historyLoadMore: 'Load more',
+            historyLoadingMore: 'Loading more...'
         };
         if (language.startsWith('pt')) {
             return Object.assign(strings, {
@@ -104,7 +106,9 @@
                 historyUntitled: 'Nova conversa',
                 historyLocalSingular: 'conversa local',
                 historyLocalPlural: 'conversas locais',
-                historyLimited: 'Mostrando as 50 conversas mais recentes.'
+                historyMoreAvailable: 'Há mais conversas disponíveis.',
+                historyLoadMore: 'Carregar mais',
+                historyLoadingMore: 'Carregando mais...'
             });
         }
         return strings;
@@ -263,12 +267,27 @@
             '  font: inherit;',
             '}',
             '.codex-vs-history-footer {',
+            '  display: flex;',
+            '  align-items: center;',
+            '  flex-wrap: wrap;',
+            '  gap: 7px;',
             '  min-height: 18px;',
             '  padding: 7px 12px 9px;',
             '  border-top: 1px solid var(--vscode-widget-border, rgba(127,127,127,.18));',
             '  color: var(--vscode-descriptionForeground, var(--token-description-foreground, #aaa));',
             '  font-size: 10px;',
             '}',
+            '.codex-vs-history-load-more, .codex-vs-history-retry {',
+            '  border: 1px solid var(--vscode-button-border, rgba(127,127,127,.3));',
+            '  border-radius: 7px;',
+            '  padding: 3px 7px;',
+            '  color: var(--vscode-button-foreground, inherit);',
+            '  background: var(--vscode-button-secondaryBackground, rgba(127,127,127,.14));',
+            '  cursor: pointer;',
+            '  font: inherit;',
+            '  font-size: 10px;',
+            '}',
+            '.codex-vs-history-load-more:disabled { cursor: default; opacity: .6; }',
             '@keyframes codex-vs-history-spin { to { transform: rotate(360deg); } }',
             '@media (prefers-reduced-motion: reduce) { .codex-vs-history-spinner { animation: none; } }',
             '@media (max-width: 340px) {',
@@ -286,6 +305,9 @@
     let recentHistoryLoading = false;
     let recentHistoryError = false;
     let recentHistoryHasMore = false;
+    let recentHistoryNextCursor = null;
+    let recentHistoryRequestCursor = null;
+    let recentHistoryRequestAppend = false;
     let recentHistoryElements = null;
 
     function normalizeHistorySearchValue(value) {
@@ -320,6 +342,13 @@
         recentHistoryRoot = null;
         recentHistoryTrigger = null;
         recentHistoryRequestId = null;
+        recentHistoryItems = [];
+        recentHistoryLoading = false;
+        recentHistoryError = false;
+        recentHistoryHasMore = false;
+        recentHistoryNextCursor = null;
+        recentHistoryRequestCursor = null;
+        recentHistoryRequestAppend = false;
         recentHistoryElements = null;
         if (root) root.remove();
         if (restoreFocus !== false && trigger && trigger.isConnected) {
@@ -331,18 +360,30 @@
         }
     }
 
-    function requestRecentHistory() {
-        if (!recentHistoryRoot) return;
+    function requestRecentHistory(cursor, append) {
+        if (!recentHistoryRoot || recentHistoryLoading) return;
+        const pageCursor = typeof cursor === 'string' && cursor.length > 0 ? cursor : null;
+        const appendPage = append === true;
         recentHistoryRequestId = appSessionId + '-history-' + (++recentHistoryRequestSequence);
-        recentHistoryItems = [];
+        recentHistoryRequestCursor = pageCursor;
+        recentHistoryRequestAppend = appendPage;
+        if (!appendPage) {
+            recentHistoryItems = [];
+            recentHistoryHasMore = false;
+            recentHistoryNextCursor = null;
+        }
         recentHistoryLoading = true;
         recentHistoryError = false;
-        recentHistoryHasMore = false;
         renderRecentHistory();
         postToHost({
             type: 'recent-history-request',
-            requestId: recentHistoryRequestId
+            requestId: recentHistoryRequestId,
+            cursor: pageCursor
         });
+    }
+
+    function retryRecentHistory() {
+        requestRecentHistory(recentHistoryRequestCursor, recentHistoryRequestAppend);
     }
 
     function renderRecentHistory() {
@@ -353,7 +394,7 @@
         elements.list.replaceChildren();
         elements.footer.textContent = '';
 
-        if (recentHistoryLoading) {
+        if (recentHistoryLoading && recentHistoryItems.length === 0) {
             const spinner = document.createElement('span');
             spinner.className = 'codex-vs-history-spinner';
             spinner.setAttribute('aria-hidden', 'true');
@@ -366,14 +407,14 @@
             return;
         }
 
-        if (recentHistoryError) {
+        if (recentHistoryError && recentHistoryItems.length === 0) {
             const label = document.createElement('span');
             label.textContent = strings.historyError;
             const retry = document.createElement('button');
             retry.type = 'button';
             retry.className = 'codex-vs-history-retry';
             retry.textContent = strings.historyRetry;
-            retry.addEventListener('click', requestRecentHistory);
+            retry.addEventListener('click', retryRecentHistory);
             elements.status.appendChild(label);
             elements.status.appendChild(retry);
             elements.status.hidden = false;
@@ -431,9 +472,32 @@
         }
 
         const count = recentHistoryItems.length;
-        elements.footer.textContent = count + ' ' +
+        const countLabel = document.createElement('span');
+        countLabel.textContent = count + ' ' +
             (count === 1 ? strings.historyLocalSingular : strings.historyLocalPlural) +
-            (recentHistoryHasMore ? ' ' + strings.historyLimited : '');
+            (recentHistoryHasMore ? ' ' + strings.historyMoreAvailable : '');
+        elements.footer.appendChild(countLabel);
+        if (recentHistoryHasMore) {
+            const loadMore = document.createElement('button');
+            loadMore.type = 'button';
+            loadMore.className = 'codex-vs-history-load-more';
+            loadMore.textContent = recentHistoryLoading && recentHistoryRequestAppend
+                ? strings.historyLoadingMore
+                : strings.historyLoadMore;
+            loadMore.disabled = recentHistoryLoading;
+            loadMore.addEventListener('click', function () {
+                requestRecentHistory(recentHistoryNextCursor, true);
+            });
+            elements.footer.appendChild(loadMore);
+        }
+        if (recentHistoryError && count > 0) {
+            const retry = document.createElement('button');
+            retry.type = 'button';
+            retry.className = 'codex-vs-history-retry';
+            retry.textContent = strings.historyRetry;
+            retry.addEventListener('click', retryRecentHistory);
+            elements.footer.appendChild(retry);
+        }
     }
 
     function openRecentHistory() {
@@ -506,7 +570,7 @@
         recentHistoryRoot = root;
         recentHistoryElements = { search: search, status: status, list: list, footer: footer };
         document.body.appendChild(root);
-        requestRecentHistory();
+        requestRecentHistory(null, false);
         window.requestAnimationFrame(function () {
             if (recentHistoryRoot === root) search.focus();
         });
@@ -516,8 +580,11 @@
         if (!recentHistoryRoot || data.requestId !== recentHistoryRequestId) return;
         recentHistoryLoading = false;
         recentHistoryError = typeof data.error === 'string' && data.error.length > 0;
-        recentHistoryHasMore = data.hasMore === true;
-        recentHistoryItems = Array.isArray(data.items) ? data.items.slice(0, 50).map(function (item) {
+        if (recentHistoryError) {
+            renderRecentHistory();
+            return;
+        }
+        const pageItems = Array.isArray(data.items) ? data.items.slice(0, 50).map(function (item) {
             if (!item || typeof item !== 'object' || typeof item.id !== 'string') return null;
             return {
                 id: item.id.slice(0, 256),
@@ -526,6 +593,17 @@
                 updatedAt: typeof item.updatedAt === 'string' || typeof item.updatedAt === 'number' ? item.updatedAt : null
             };
         }).filter(function (item) { return item && item.id.length > 0; }) : [];
+        const mergedItems = recentHistoryRequestAppend ? recentHistoryItems.concat(pageItems) : pageItems;
+        const seen = new Set();
+        recentHistoryItems = mergedItems.filter(function (item) {
+            if (seen.has(item.id)) return false;
+            seen.add(item.id);
+            return true;
+        });
+        recentHistoryNextCursor = typeof data.nextCursor === 'string' && data.nextCursor.length > 0
+            ? data.nextCursor
+            : null;
+        recentHistoryHasMore = data.hasMore === true && recentHistoryNextCursor !== null;
         renderRecentHistory();
     }
 
@@ -729,6 +807,8 @@
         }
         if (data.type === 'recent-history-response') {
             handleRecentHistoryResponse(data);
+        } else if (data.type === 'active-workspace-roots-updated') {
+            closeRecentHistory(false);
         } else if (data.type === 'navigate-to-route' && recentHistoryRoot) {
             closeRecentHistory(false);
         }

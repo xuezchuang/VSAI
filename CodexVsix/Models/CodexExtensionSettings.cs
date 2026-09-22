@@ -29,6 +29,7 @@ public sealed class CodexExtensionSettings
     public string LastThreadWorkingDirectory { get; set; } = "";
     public List<string> PromptHistory { get; set; } = new();
     public List<string> CustomModels { get; set; } = new();
+    public List<CodexProviderConfiguration> Providers { get; set; } = new();
     public List<string> CustomReasoningEfforts { get; set; } = new();
     public List<string> CustomVerbosityOptions { get; set; } = new();
     public List<string> CustomServiceTiers { get; set; } = new();

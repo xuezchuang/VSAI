@@ -137,6 +137,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         _codexProcessService.ThreadCatalogChanged += HandleThreadCatalogChanged;
         _codexProcessService.RateLimitsUpdated += HandleRateLimitsUpdated;
         _codexProcessService.AccountUpdated += HandleAccountUpdated;
+        _codexProcessService.ProvidersChanged += HandleProviderSettingsChanged;
 
         SendCommand = new DelegateCommand(Send, () => CanSubmitPrompt());
         CancelCommand = new DelegateCommand(Cancel, () => IsBusy && !IsStopping);
@@ -255,6 +256,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         _codexProcessService.ThreadCatalogChanged -= HandleThreadCatalogChanged;
         _codexProcessService.RateLimitsUpdated -= HandleRateLimitsUpdated;
         _codexProcessService.AccountUpdated -= HandleAccountUpdated;
+        _codexProcessService.ProvidersChanged -= HandleProviderSettingsChanged;
         _codexProcessService.Dispose();
     }
 
@@ -1948,6 +1950,16 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
                     OnPropertyChanged(nameof(SelectedLanguageTag));
                     break;
             }
+        });
+    }
+
+    private void HandleProviderSettingsChanged()
+    {
+        RunOnUiThread(() =>
+        {
+            OnPropertyChanged(nameof(Settings));
+            RefreshCodexStatusAsync().FileAndForget("CodexVsix/RefreshProviderStatus");
+            RefreshModelOptionsAsync(force: true).FileAndForget("CodexVsix/RefreshProviderModels");
         });
     }
 

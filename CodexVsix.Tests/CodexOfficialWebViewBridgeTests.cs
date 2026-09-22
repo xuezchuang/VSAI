@@ -200,7 +200,87 @@ public sealed class CodexOfficialWebViewBridgeTests
         Assert.Equal(50, parameters["limit"]?.Value<int>());
         Assert.Equal("created_at", parameters["sortKey"]?.Value<string>());
         Assert.Equal(JTokenType.Null, parameters["cursor"]?.Type);
-        Assert.Equal(JTokenType.Null, parameters["modelProviders"]?.Type);
+        Assert.Empty(Assert.IsType<JArray>(parameters["modelProviders"]));
+    }
+
+    [Fact]
+    public void HistoryPageKeepsTheServerCursorAndIncludesEveryProvider()
+    {
+        var parameters = CodexOfficialWebViewBridge.BuildRecentConversationRefreshParams(
+            new JObject { ["cursor"] = "older-page", ["modelProviders"] = new JArray("current-profile") });
+
+        Assert.Equal("older-page", parameters["cursor"]?.Value<string>());
+        Assert.Equal(50, parameters["limit"]?.Value<int>());
+        Assert.Empty(Assert.IsType<JArray>(parameters["modelProviders"]));
+    }
+
+    [Theory]
+    [InlineData(@"D:\work\project", @"D:\work\project", @"\\?\D:\work\project")]
+    [InlineData(@"\\?\D:\work\project\", @"D:\work\project", @"\\?\D:\work\project")]
+    [InlineData(@"\\server\share\project", @"\\server\share\project", @"\\?\UNC\server\share\project")]
+    public void HistoryQueryUsesTheSelectedFolderAcrossProfiles(string selected, string normal, string extended)
+    {
+        var original = new JObject
+        {
+            ["cwd"] = @"C:\previous",
+            ["modelProviders"] = new JArray("selected-provider"),
+            ["sourceKinds"] = new JArray("vscode"),
+            ["cursor"] = "next-page", ["limit"] = 25, ["archived"] = false,
+            ["sortKey"] = "updated_at", ["searchTerm"] = "render"
+        };
+        var request = CodexOfficialWebViewBridge.PrepareWorkspaceHistoryParams(original, selected);
+
+        Assert.Equal(new[] { normal, extended }, Assert.IsType<JArray>(request["cwd"]).Values<string>());
+        Assert.Empty(Assert.IsType<JArray>(request["modelProviders"]));
+        Assert.Empty(Assert.IsType<JArray>(request["sourceKinds"]));
+        Assert.Equal("next-page", request["cursor"]?.Value<string>());
+        Assert.Equal("render", request["searchTerm"]?.Value<string>());
+        Assert.Equal(25, request["limit"]?.Value<int>());
+        Assert.False(request["archived"]?.Value<bool>());
+        Assert.Equal(@"C:\previous", original["cwd"]?.Value<string>());
+        Assert.Equal("selected-provider", original["modelProviders"]?[0]?.Value<string>());
+    }
+
+    [Fact]
+    public void HistoryRowsMatchFullPathsAndKeepAllProvidersWithoutChangingSessionMetadata()
+    {
+        var original = new JObject
+        {
+            ["data"] = new JArray(
+                new JObject { ["id"] = "official", ["cwd"] = @"D:\work\one\trunk", ["modelProvider"] = "openai" },
+                new JObject { ["id"] = "custom", ["cwd"] = @"\\?\D:\work\one\trunk\", ["modelProvider"] = "custom-profile" },
+                new JObject { ["id"] = "old-provider", ["cwd"] = "d:/WORK/one/trunk", ["modelProvider"] = "removed-provider" },
+                new JObject { ["id"] = "other-trunk", ["cwd"] = @"D:\work\two\trunk" },
+                new JObject { ["id"] = "child-folder", ["cwd"] = @"D:\work\one\trunk\src" },
+                new JObject { ["id"] = "missing-cwd" }),
+            ["nextCursor"] = "older"
+        };
+        var response = CodexOfficialWebViewBridge.FilterWorkspaceHistoryResult(
+            original, @"D:\work\one\trunk", @"D:\work\one\trunk");
+
+        foreach (var key in new[] { "data", "threads", "conversations" })
+        {
+            var rows = Assert.IsType<JArray>(response[key]);
+            Assert.Equal(new[] { "official", "custom", "old-provider" }, rows.Select(row => row["id"]!.Value<string>()));
+        }
+        Assert.Equal("custom-profile", response["data"]?[1]?["modelProvider"]?.Value<string>());
+        Assert.Equal(@"\\?\D:\work\one\trunk\", response["data"]?[1]?["cwd"]?.Value<string>());
+        Assert.Equal("older", response["nextCursor"]?.Value<string>());
+        Assert.Equal(6, Assert.IsType<JArray>(original["data"]).Count);
+    }
+
+    [Fact]
+    public void DelayedHistoryPageCannotPublishRowsOrCursorAfterChangingFolders()
+    {
+        var response = CodexOfficialWebViewBridge.FilterWorkspaceHistoryResult(new JObject
+        {
+            ["data"] = new JArray(new JObject { ["id"] = "old", ["cwd"] = @"D:\old" }),
+            ["nextCursor"] = "old-page", ["cursor"] = "legacy-old-page"
+        }, @"D:\old", @"D:\new");
+
+        Assert.Empty(Assert.IsType<JArray>(response["data"]));
+        Assert.Equal(JTokenType.Null, response["nextCursor"]?.Type);
+        Assert.Equal(JTokenType.Null, response["cursor"]?.Type);
     }
 
     [Fact]
@@ -232,6 +312,7 @@ public sealed class CodexOfficialWebViewBridgeTests
 
         Assert.Equal(50, items.Count);
         Assert.True(response["hasMore"]?.Value<bool>());
+        Assert.Equal("more", response["nextCursor"]?.Value<string>());
         Assert.Equal("thread-0", first["id"]?.Value<string>());
         Assert.Equal("Task 0", first["title"]?.Value<string>());
         Assert.Equal("project-0", first["workspaceName"]?.Value<string>());

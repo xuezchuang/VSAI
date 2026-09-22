@@ -73,6 +73,14 @@ public sealed class CodexEnvironmentService
             var hasOpenaiAuthentication = status.HasApiKey || status.HasAuthFile || hasManagedLogin;
             var hasProviderAuthentication = providerInspection.IsReady;
 
+            if (!hasOpenaiAuthentication && settings.Providers.Count > 0)
+            {
+                foreach (var provider in settings.Providers) CodexProviderConfigurationService.Validate(provider);
+                status.RequiresOpenaiAuth = false;
+                hasProviderAuthentication = true;
+                status.AuthenticationLabel = "第三方服务已配置";
+            }
+
             status.Stage = status.RequiresOpenaiAuth
                 ? (hasOpenaiAuthentication ? CodexSetupStage.Ready : CodexSetupStage.MissingAuthentication)
                 : (hasProviderAuthentication ? CodexSetupStage.Ready : CodexSetupStage.MissingAuthentication);
@@ -253,6 +261,10 @@ public sealed class CodexEnvironmentService
         };
 
         ApplyEnvironmentVariables(process.StartInfo, settings.EnvironmentVariables);
+        foreach (var provider in settings.Providers)
+        {
+            CodexProviderConfigurationService.ApplyEnvironment(process.StartInfo, provider);
+        }
 
         try
         {
@@ -490,7 +502,7 @@ public sealed class CodexEnvironmentService
 
     private static string BuildServerProbeArguments(CodexExtensionSettings settings)
     {
-        return CodexAppServerCommandLine.Build(settings);
+        return CodexAppServerCommandLine.Build(settings, CodexProviderModelCatalogRuntime.Prepare(settings));
     }
 
     private static async Task<bool> WaitForExitAsync(Process process, int timeoutMilliseconds, CancellationToken cancellationToken)

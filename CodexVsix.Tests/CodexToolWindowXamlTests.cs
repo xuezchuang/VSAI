@@ -78,8 +78,9 @@ public sealed class CodexToolWindowXamlTests
         var classicControlSource = File.ReadAllText(FindRepositoryFile("CodexVsix", "CodexToolWindowControl.xaml.cs"));
 
         Assert.Contains("[Guid(GuidList.ToolWindowPersistanceString)]", toolWindowSource);
-        Assert.Contains("Content = WithWorkspaceSelector(_webViewHost);", toolWindowSource);
-        Assert.Contains("Content = WithWorkspaceSelector(_classicControl);", toolWindowSource);
+        Assert.Contains("Content = _webViewHost;", toolWindowSource);
+        Assert.Contains("Content = _classicControl;", toolWindowSource);
+        Assert.DoesNotContain("WithWorkspaceSelector", toolWindowSource);
         Assert.Contains("CodexRendererCoordinator.Shared", toolWindowSource);
         Assert.Contains("if (renderer == CodexRendererKind.ClassicWpf)", toolWindowSource);
         Assert.Contains("_webViewHost = new CodexOfficialWebViewHost(_viewModel);", toolWindowSource);

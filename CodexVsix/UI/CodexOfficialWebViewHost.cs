@@ -315,7 +315,9 @@ internal sealed class CodexOfficialWebViewHost : Grid, IDisposable
                 ResolveLocale(),
                 theme,
                 _currentRoute,
-                _viewModel.Settings.EnableDiagnosticLogging);
+                _viewModel.Settings.EnableDiagnosticLogging,
+                _isSettingsSurface,
+                compatibilityDirectory: shellDirectory);
             File.WriteAllText(shellPath, html);
 
             webView.CoreWebView2.SetVirtualHostNameToFolderMapping(

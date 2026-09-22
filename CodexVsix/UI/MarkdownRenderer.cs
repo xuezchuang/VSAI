@@ -353,7 +353,7 @@ internal static class MarkdownRenderer
     private static Inline CreateHyperlink(string label, string url)
     {
         var command = CurrentOptions.LinkCommand;
-        var target = TrimFileReferenceDisplay(url);
+        var target = GetMarkdownLinkTarget(url);
         if (CanExecuteLinkCommand(command, target))
         {
             return CreateCommandHyperlink(label, target, command);
@@ -393,6 +393,18 @@ internal static class MarkdownRenderer
         };
 
         return hyperlink;
+    }
+
+    internal static string GetMarkdownLinkTarget(string url)
+    {
+        var target = TrimFileReferenceDisplay(url).Trim('<', '>');
+        // VSIX source links escape literal percent signs for the official WebView's
+        // decodeURI step. Apply that one layer at the Markdown-link boundary only;
+        // plain text references keep literal %, and file URIs are decoded by LocalPath.
+        return !target.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
+            && SolutionContextService.TryParseFileReference(target, out _)
+            ? target.Replace("%25", "%")
+            : target;
     }
 
     internal static bool TryGetSafeExternalUri(string? value, out Uri uri)

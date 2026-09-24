@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <Metadata>
-    <Identity Id="VSAI.2100D026-139B-4827-A538-306555F3C0BC" Version="1.0.0" Language="en-US" Publisher="xuezchuang" />
+    <Identity Id="VSAI.2100D026-139B-4827-A538-306555F3C0BC" Version="1.0.3" Language="en-US" Publisher="xuezchuang" />
     <DisplayName>VSAI</DisplayName>
     <Description xml:space="preserve">VSAI adds a docked Codex tool window to Visual Studio 2022 and 2026 with chat, approvals, image attachments, and solution-aware context. This extension is an independent project and is not affiliated with, endorsed by, or officially associated with OpenAI or ChatGPT. Any logos or references used are for integration purposes only.</Description>
     <MoreInfo>https://github.com/xuezchuang/VSAI</MoreInfo>

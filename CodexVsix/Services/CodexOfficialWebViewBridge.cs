@@ -1331,11 +1331,14 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         await _historyWindowController.WaitForCapacityAsync(method, enrichedParameters, cancellationToken).ConfigureAwait(false);
         try
         {
-            var result = await _processService.InvokeAppServerRequestAsync(
-                _viewModel.Settings,
-                method,
-                enrichedParameters,
-                cancellationToken).ConfigureAwait(false);
+            var result = string.Equals(method, "windowsSandbox/setupStart", StringComparison.Ordinal)
+                ? await _processService.StartWindowsSandboxSetupAsync(
+                    _viewModel.Settings, enrichedParameters, cancellationToken).ConfigureAwait(false)
+                : string.Equals(method, "windowsSandbox/readiness", StringComparison.Ordinal)
+                    ? await _processService.ReadWindowsSandboxReadinessAsync(
+                        _viewModel.Settings, cancellationToken).ConfigureAwait(false)
+                : await _processService.InvokeAppServerRequestAsync(
+                    _viewModel.Settings, method, enrichedParameters, cancellationToken).ConfigureAwait(false);
             _workspaceRequests.ObserveResponse(method, parameters, preparedParameters, result);
             if (method == "thread/list")
             {

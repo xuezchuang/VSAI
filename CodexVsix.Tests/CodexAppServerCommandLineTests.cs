@@ -10,6 +10,22 @@ namespace CodexVsix.Tests;
 public sealed class CodexAppServerCommandLineTests
 {
     [Fact]
+    public void SandboxSetupPermissionOverrideIsLastAndDoesNotChangeNormalServerArguments()
+    {
+        var settings = new CodexExtensionSettings { RawTomlOverrides = "sandbox_mode=\"danger-full-access\"" };
+        var overrideValue = "sandbox_mode=\"workspace-write\"";
+
+        var setupArguments = CodexAppServerCommandLine.SplitArguments(
+            CodexAppServerCommandLine.Build(settings, finalConfigOverrides: new[] { overrideValue })).ToArray();
+        var regularArguments = CodexAppServerCommandLine.SplitArguments(
+            CodexAppServerCommandLine.Build(settings)).ToArray();
+
+        Assert.Equal("-c", setupArguments[setupArguments.Length - 2]);
+        Assert.Equal(overrideValue, setupArguments[setupArguments.Length - 1]);
+        Assert.DoesNotContain(overrideValue, regularArguments);
+    }
+
+    [Fact]
     public void ExecutableResolverAcceptsQuotedAndEnvironmentExpandedPaths()
     {
         using var directory = new TemporaryDirectory();

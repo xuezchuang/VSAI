@@ -5,6 +5,8 @@ namespace CodexVsix.Models;
 
 public sealed class CodexExtensionSettings
 {
+    internal CodexExtensionSettings SnapshotForSandboxSetup() => (CodexExtensionSettings)MemberwiseClone();
+
     public string CodexExecutablePath { get; set; } = "codex.cmd";
     public string LanguageOverride { get; set; } = "";
     public string WorkingDirectory { get; set; } = "";

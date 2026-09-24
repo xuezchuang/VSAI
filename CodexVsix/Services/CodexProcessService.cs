@@ -66,6 +66,10 @@ public sealed class CodexProcessService : IDisposable
     private readonly Dictionary<string, string> _skillsByName = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _migrationAttemptedHomes = new(StringComparer.OrdinalIgnoreCase);
     private readonly CodexDiagnosticLogger _diagnostics;
+    private readonly bool _skipSessionMigration;
+    private readonly IReadOnlyList<string>? _processConfigOverrides;
+    private CodexWindowsSandboxSetupCoordinator? _sandboxSetupCoordinator;
+    private bool _useFreshWindowsSandboxReadiness;
 
     private Process? _serverProcess;
     private StreamWriter? _serverInput;
@@ -91,6 +95,7 @@ public sealed class CodexProcessService : IDisposable
     public event Action? AccountUpdated;
     internal event Action? ProvidersChanged;
     internal event Action? NativeModelsChanged;
+    internal event Action? AppServerProcessExited;
     internal IReadOnlyList<string> ProviderCatalogRuntimeWarnings { get; private set; } = Array.Empty<string>();
     internal string SessionMigrationError { get; private set; } = string.Empty;
     internal bool HasActiveProviderWork => _providerRouter.IsBusy || _activeTurn is not null;
@@ -102,8 +107,18 @@ public sealed class CodexProcessService : IDisposable
     }
 
     internal CodexProcessService(CodexDiagnosticLogger diagnostics)
+        : this(diagnostics, skipSessionMigration: false, processConfigOverrides: null)
+    {
+    }
+
+    internal CodexProcessService(
+        CodexDiagnosticLogger diagnostics,
+        bool skipSessionMigration,
+        IReadOnlyList<string>? processConfigOverrides)
     {
         _diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
+        _skipSessionMigration = skipSessionMigration;
+        _processConfigOverrides = processConfigOverrides;
     }
 
     public string? CurrentThreadId
@@ -136,6 +151,54 @@ public sealed class CodexProcessService : IDisposable
             return await InvokeProviderRequestAsync(settings, method, parameters, cancellationToken).ConfigureAwait(false);
         }
         finally { _providerGate.Release(); }
+    }
+
+    internal async Task<JToken?> StartWindowsSandboxSetupAsync(
+        CodexExtensionSettings settings,
+        JToken? parameters,
+        CancellationToken cancellationToken)
+    {
+        CodexWindowsSandboxSetupCoordinator coordinator;
+        lock (_syncRoot)
+        {
+            _sandboxSetupCoordinator ??= new CodexWindowsSandboxSetupCoordinator(
+                _diagnostics,
+                async (setupSettings, token) =>
+                {
+                    // The running chat server may retain its startup Windows sandbox mode.
+                    var readiness = await ReadFreshWindowsSandboxReadinessAsync(
+                        setupSettings, token).ConfigureAwait(false);
+                    return string.Equals(readiness?["status"]?.Value<string>(), "ready", StringComparison.Ordinal);
+                },
+                completed =>
+                {
+                    // A setup attempt can update disk configuration even when verification fails.
+                    Volatile.Write(ref _useFreshWindowsSandboxReadiness, true);
+                    AppServerNotificationReceived?.Invoke("windowsSandbox/setupCompleted", completed);
+                });
+            coordinator = _sandboxSetupCoordinator;
+        }
+        var response = await coordinator.StartAsync(settings, parameters, cancellationToken).ConfigureAwait(false);
+        if (response?["started"]?.Value<bool>() == true)
+            Volatile.Write(ref _useFreshWindowsSandboxReadiness, true);
+        return response;
+    }
+
+    internal Task<JToken?> ReadWindowsSandboxReadinessAsync(
+        CodexExtensionSettings settings,
+        CancellationToken cancellationToken) =>
+        Volatile.Read(ref _useFreshWindowsSandboxReadiness)
+            ? ReadFreshWindowsSandboxReadinessAsync(settings, cancellationToken)
+            : InvokeAppServerRequestAsync(settings, "windowsSandbox/readiness", new JObject(), cancellationToken);
+
+    private async Task<JToken?> ReadFreshWindowsSandboxReadinessAsync(
+        CodexExtensionSettings settings,
+        CancellationToken cancellationToken)
+    {
+        using var service = new CodexProcessService(
+            _diagnostics, skipSessionMigration: true, processConfigOverrides: null);
+        return await service.InvokeAppServerRequestAsync(
+            settings, "windowsSandbox/readiness", new JObject(), cancellationToken).ConfigureAwait(false);
     }
 
     private Task<JToken?> InvokeProviderRequestAsync(CodexExtensionSettings settings, string method, JToken? parameters, CancellationToken token)
@@ -271,6 +334,7 @@ public sealed class CodexProcessService : IDisposable
 
     public void Dispose()
     {
+        _sandboxSetupCoordinator?.Dispose();
         lock (_syncRoot)
         {
             _activeTurn?.TrySetResult(1);
@@ -1087,7 +1151,10 @@ public sealed class CodexProcessService : IDisposable
             {
                 StartServerProcess(settings, workingDirectory, modelCatalogPath);
                 await InitializeServerAsync(cancellationToken).ConfigureAwait(false);
-                await MigrateSessionStorageAsync(settings, cancellationToken).ConfigureAwait(false);
+                if (!_skipSessionMigration)
+                {
+                    await MigrateSessionStorageAsync(settings, cancellationToken).ConfigureAwait(false);
+                }
                 if (nativeModelsChanged)
                 {
                     try { NativeModelsChanged?.Invoke(); }
@@ -1286,7 +1353,8 @@ public sealed class CodexProcessService : IDisposable
             executablePath = CodexExecutableResolver.NormalizeConfiguredExecutablePath(settings.CodexExecutablePath);
         }
 
-        var arguments = CodexAppServerCommandLine.Build(settings, modelCatalogPath);
+        var arguments = CodexAppServerCommandLine.Build(
+            settings, modelCatalogPath, finalConfigOverrides: _processConfigOverrides);
         var startInfo = BuildStartInfo(executablePath, arguments, workingDirectory);
 
         var psi = new ProcessStartInfo
@@ -1337,9 +1405,33 @@ public sealed class CodexProcessService : IDisposable
                 ["executable"] = Path.GetFileName(executablePath)
             });
 
-        process.Exited += (_, _) => FailPendingOperations(process, generation, GetLocalization().AppServerClosedUnexpectedly);
-        _ = Task.Run(() => ReadStdoutLoopAsync(process, generation));
+        var stdoutReader = Task.Run(() => ReadStdoutLoopAsync(process, generation));
         _ = Task.Run(() => ReadStderrLoopAsync(process, generation));
+        var exitHandled = 0;
+        void OnExited()
+        {
+            if (Interlocked.Exchange(ref exitHandled, 1) != 0) return;
+            _ = HandleProcessExitAfterStdoutAsync(process, generation, stdoutReader);
+        }
+
+        process.Exited += (_, _) => OnExited();
+        if (process.HasExited) OnExited();
+    }
+
+    [SuppressMessage("Usage", "VSTHRD003:Avoid awaiting foreign Tasks", Justification =
+        "The stdout reader is a background task, and draining its final messages must precede process failure handling.")]
+    private async Task HandleProcessExitAfterStdoutAsync(Process process, long generation, Task stdoutReader)
+    {
+        // A successful setup completion can be buffered in stdout after the process exits.
+        // Keep the old generation valid until the reader reaches EOF, with a bound for held pipes.
+        await Task.WhenAny(stdoutReader, Task.Delay(TimeSpan.FromSeconds(5))).ConfigureAwait(false);
+        FailPendingOperations(process, generation, GetLocalization().AppServerClosedUnexpectedly);
+        try { AppServerProcessExited?.Invoke(); }
+        catch (Exception ex)
+        {
+            _diagnostics.Write("appserver.exit-notification-failed",
+                new JObject { ["errorType"] = ex.GetType().FullName });
+        }
     }
 
     private async Task ReadStdoutLoopAsync(Process process, long generation)
@@ -1536,6 +1628,11 @@ public sealed class CodexProcessService : IDisposable
                 ["method"] = pendingRequest.Method,
                 ["resultType"] = message["result"]?.Type.ToString() ?? "missing"
             });
+        if (IsWindowsSandboxRequest(pendingRequest.Method))
+        {
+            LogWindowsSandboxEvent("windows-sandbox.response", pendingRequest.Method,
+                message["result"], pendingRequest.Generation, id);
+        }
         tcs.TrySetResult(message["result"]);
     }
 
@@ -1682,6 +1779,10 @@ public sealed class CodexProcessService : IDisposable
     {
         var method = message["method"]?.Value<string>() ?? string.Empty;
         var parameters = message["params"] as JObject;
+        if (string.Equals(method, "windowsSandbox/setupCompleted", StringComparison.Ordinal))
+        {
+            LogWindowsSandboxEvent("windows-sandbox.completed", method, parameters, _serverGeneration);
+        }
         _providerRouter.ObserveNotification(method, parameters);
 
         try
@@ -2179,6 +2280,11 @@ public sealed class CodexProcessService : IDisposable
                 ["generation"] = generation,
                 ["method"] = method
             });
+
+        if (_diagnostics.IsEnabled && IsWindowsSandboxRequest(method))
+        {
+            LogWindowsSandboxEvent("windows-sandbox.request", method, ConvertParameters(parameters), generation, id);
+        }
 
         using (cancellationToken.Register(() =>
         {
@@ -5021,6 +5127,40 @@ public sealed class CodexProcessService : IDisposable
         }
 
         turnState?.OnError(RedactProviderSecrets(text));
+    }
+
+    private static bool IsWindowsSandboxRequest(string method)
+    {
+        return string.Equals(method, "windowsSandbox/readiness", StringComparison.Ordinal)
+            || string.Equals(method, "windowsSandbox/setupStart", StringComparison.Ordinal);
+    }
+
+    private void LogWindowsSandboxEvent(string eventName, string method, JToken? values, long generation, long? requestId = null)
+    {
+        if (!_diagnostics.IsEnabled) return;
+
+        var details = new JObject
+        {
+            ["method"] = method,
+            ["generation"] = generation
+        };
+        if (requestId.HasValue) details["requestId"] = requestId.Value;
+
+        // Capture only sandbox protocol fields, never an arbitrary response or conversation.
+        if (values is JObject fields)
+        {
+            var names = eventName == "windows-sandbox.request" ? new[] { "mode", "cwd" }
+                : eventName == "windows-sandbox.response" ? new[] { "status", "started" }
+                : new[] { "mode", "success", "error" };
+            foreach (var name in names)
+            {
+                if (fields[name] is not JValue value) continue;
+                details[name] = value.Type == JTokenType.String
+                    ? new JValue(RedactProviderSecrets(value.Value<string>() ?? string.Empty))
+                    : value.DeepClone();
+            }
+        }
+        _diagnostics.Write(eventName, details);
     }
 
     private string RedactProviderSecrets(string value)

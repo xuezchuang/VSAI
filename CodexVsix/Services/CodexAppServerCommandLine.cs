@@ -13,7 +13,11 @@ namespace CodexVsix.Services;
 /// </summary>
 internal static class CodexAppServerCommandLine
 {
-    internal static string Build(CodexExtensionSettings settings, string? modelCatalogPath = null, bool migrationSource = false)
+    internal static string Build(
+        CodexExtensionSettings settings,
+        string? modelCatalogPath = null,
+        bool migrationSource = false,
+        IReadOnlyList<string>? finalConfigOverrides = null)
     {
         if (settings is null)
         {
@@ -54,6 +58,14 @@ internal static class CodexAppServerCommandLine
         {
             args.Add("-c");
             args.Add(value);
+        }
+        if (finalConfigOverrides is not null)
+        {
+            foreach (var value in finalConfigOverrides)
+            {
+                args.Add("-c");
+                args.Add(value);
+            }
         }
         return JoinArguments(args);
     }

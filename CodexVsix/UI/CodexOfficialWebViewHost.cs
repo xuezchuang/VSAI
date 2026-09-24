@@ -125,7 +125,8 @@ internal sealed class CodexOfficialWebViewHost : Grid, IDisposable
             section => global::CodexVsix.CodexToolWindowManager.ShowSettingsToolWindow(section),
             queryKey => CodexOfficialWebViewHostRegistry.BroadcastQueryInvalidation(this, queryKey),
             isSettingsSurface,
-            UpdateCurrentRoute);
+            UpdateCurrentRoute,
+            () => _currentRoute);
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
         SizeChanged += OnSizeChanged;

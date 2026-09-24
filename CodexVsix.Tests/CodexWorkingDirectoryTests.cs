@@ -17,7 +17,34 @@ public sealed class CodexWorkingDirectoryTests
     }
 
     [Fact]
-    public void SelectedFolderSurvivesReloadAndAnotherSolution()
+    public void DifferentSolutionsDoNotInheritALegacyPinnedFolder()
+    {
+        var settings = new CodexExtensionSettings
+        {
+            WorkingDirectory = @"C:\previous",
+            FollowSolutionDirectory = false
+        };
+
+        Assert.Equal(@"D:\first", CodexWorkingDirectory.ResolveForSolution(
+            settings, @"D:\first\first.sln", @"D:\first"));
+        Assert.Equal(@"E:\second", CodexWorkingDirectory.ResolveForSolution(
+            settings, @"E:\second\second.sln", @"E:\second"));
+    }
+
+    [Fact]
+    public void ACustomFolderAppliesOnlyToItsSolution()
+    {
+        var settings = new CodexExtensionSettings();
+        settings.SolutionWorkingDirectories[@"D:\first\first.sln"] = @"F:\first-worktree";
+
+        Assert.Equal(@"F:\first-worktree", CodexWorkingDirectory.ResolveForSolution(
+            settings, @"d:\FIRST\FIRST.sln", @"D:\first"));
+        Assert.Equal(@"E:\second", CodexWorkingDirectory.ResolveForSolution(
+            settings, @"E:\second\second.sln", @"E:\second"));
+    }
+
+    [Fact]
+    public void SelectedFolderSurvivesReloadWithoutASolution()
     {
         using var temp = new TemporaryDirectory();
         var chosen = Path.Combine(temp.Path, "工程 with spaces %23 #1");
@@ -29,7 +56,7 @@ public sealed class CodexWorkingDirectoryTests
         var reloaded = store.Load();
 
         Assert.False(reloaded.FollowSolutionDirectory);
-        Assert.Equal(chosen, CodexWorkingDirectory.Resolve(reloaded, @"D:\other-solution"));
+        Assert.Equal(chosen, CodexWorkingDirectory.Resolve(reloaded));
         Assert.Equal(chosen, CodexWorkingDirectory.Resolve(reloaded.WorkingDirectory));
     }
 

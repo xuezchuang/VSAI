@@ -57,6 +57,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
     private readonly Action<JToken>? _broadcastQueryInvalidation;
     private readonly bool _isSettingsSurface;
     private readonly Action<string>? _routeChanged;
+    private readonly Func<string>? _currentRoute;
     private bool _disposed;
     private CancellationTokenSource? _providerDiscoveryCancellation;
     private string? _providerDiscoveryToken;
@@ -71,7 +72,8 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         Action<string>? openSettings = null,
         Action<JToken>? broadcastQueryInvalidation = null,
         bool isSettingsSurface = false,
-        Action<string>? routeChanged = null)
+        Action<string>? routeChanged = null,
+        Func<string>? currentRoute = null)
     {
         _viewModel = viewModel;
         _processService = viewModel.ProcessService;
@@ -84,6 +86,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         _broadcastQueryInvalidation = broadcastQueryInvalidation;
         _isSettingsSurface = isSettingsSurface;
         _routeChanged = routeChanged;
+        _currentRoute = currentRoute;
         _workspaceDirectory = ResolveWorkingDirectory();
         _viewModel.WorkingDirectoryChanged += OnWorkingDirectoryChanged;
         _viewModel.PropertyChanged += OnProjectSettingsPropertyChanged;
@@ -194,6 +197,10 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
 
             case "recent-history-request":
                 await HandleRecentHistoryRequestAsync(message, cancellationToken).ConfigureAwait(false);
+                return;
+
+            case "recent-history-archive":
+                await HandleRecentHistoryArchiveAsync(message, cancellationToken).ConfigureAwait(false);
                 return;
 
             case "persisted-atom-sync-request":
@@ -1430,6 +1437,84 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
                 ["error"] = "LOCAL_HISTORY_UNAVAILABLE"
             });
         }
+    }
+
+    private async Task HandleRecentHistoryArchiveAsync(JObject message, CancellationToken cancellationToken)
+    {
+        var requestId = message["requestId"]?.Type == JTokenType.String
+            ? message["requestId"]!.Value<string>() : null;
+        var threadId = message["threadId"]?.Type == JTokenType.String
+            ? message["threadId"]!.Value<string>() : null;
+        if (string.IsNullOrWhiteSpace(requestId) || requestId!.Length > 128 ||
+            string.IsNullOrWhiteSpace(threadId) || threadId!.Length > 256)
+        {
+            return;
+        }
+
+        var workspaceDirectory = ResolveWorkingDirectory();
+        try
+        {
+            var result = await _processService.InvokeAppServerRequestAsync(
+                _viewModel.Settings,
+                "thread/read",
+                new JObject { ["threadId"] = threadId, ["includeTurns"] = false },
+                cancellationToken).ConfigureAwait(false);
+            if (!RecentHistoryThreadBelongsToWorkspace(result, threadId, workspaceDirectory) ||
+                !string.Equals(CodexProcessService.NormalizeComparablePath(workspaceDirectory),
+                    CodexProcessService.NormalizeComparablePath(ResolveWorkingDirectory()), StringComparison.OrdinalIgnoreCase))
+            {
+                Post(new JObject { ["type"] = "recent-history-archive-response", ["requestId"] = requestId,
+                    ["threadId"] = threadId, ["ok"] = false, ["error"] = "WORKSPACE_MISMATCH" });
+                return;
+            }
+
+            await _processService.ArchiveThreadAsync(_viewModel.Settings, threadId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogError("recent local history archive failed: " + ex.GetType().Name);
+            Post(new JObject { ["type"] = "recent-history-archive-response", ["requestId"] = requestId,
+                ["threadId"] = threadId, ["ok"] = false, ["error"] = "LOCAL_HISTORY_ARCHIVE_FAILED" });
+            return;
+        }
+
+        if (string.Equals(_viewModel.Settings.CurrentThreadId, threadId, StringComparison.Ordinal))
+        {
+            _viewModel.Settings.CurrentThreadId = string.Empty;
+            _viewModel.Settings.LastThreadWorkingDirectory = _viewModel.Settings.WorkingDirectory;
+            try
+            {
+                _settingsStore.Save(_viewModel.Settings);
+            }
+            catch (Exception ex)
+            {
+                LogError("archived current thread settings save failed: " + ex.GetType().Name);
+            }
+        }
+
+        Post(new JObject { ["type"] = "recent-history-archive-response", ["requestId"] = requestId,
+            ["threadId"] = threadId, ["ok"] = true });
+        foreach (var key in new[] { new JArray("recent-conversations"), new JArray("recent-conversations-meta") })
+        {
+            Post(CreateQueryInvalidationNotification(key));
+            _broadcastQueryInvalidation?.Invoke(key);
+        }
+        if (string.Equals(_currentRoute?.Invoke(), "/local/" + Uri.EscapeDataString(threadId), StringComparison.Ordinal))
+        {
+            _routeChanged?.Invoke("/");
+            Post(new JObject { ["type"] = "navigate-to-route", ["path"] = "/" });
+        }
+    }
+
+    internal static bool RecentHistoryThreadBelongsToWorkspace(JToken? result, string threadId, string workspaceDirectory)
+    {
+        var thread = result?["thread"];
+        var actualId = thread?["id"]?.Value<string>();
+        var cwd = thread?["cwd"]?.Value<string>();
+        return !string.IsNullOrWhiteSpace(cwd)
+            && string.Equals(actualId, threadId, StringComparison.Ordinal)
+            && string.Equals(CodexProcessService.NormalizeComparablePath(cwd),
+                CodexProcessService.NormalizeComparablePath(workspaceDirectory), StringComparison.OrdinalIgnoreCase);
     }
 
     private JObject GetConfiguration(JObject values)

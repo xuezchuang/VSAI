@@ -303,6 +303,24 @@ public sealed class CodexOfficialWebViewBridgeTests
         Assert.Equal(JTokenType.Null, response["cursor"]?.Type);
     }
 
+    [Theory]
+    [InlineData("wanted", @"D:\work\one", "wanted", @"\\?\D:\work\one\", true)]
+    [InlineData("wanted", @"D:\work\one", "other", @"D:\work\one", false)]
+    [InlineData("wanted", @"D:\work\one", "wanted", @"D:\work\two", false)]
+    [InlineData("wanted", @"D:\work\one", "wanted", null, false)]
+    public void HistoryArchiveRequiresExactThreadAndWorkspace(
+        string requestedId, string workspace, string actualId, string? actualCwd, bool expected)
+    {
+        var result = new JObject { ["thread"] = new JObject
+        {
+            ["id"] = actualId,
+            ["cwd"] = actualCwd
+        } };
+
+        Assert.Equal(expected, CodexOfficialWebViewBridge.RecentHistoryThreadBelongsToWorkspace(
+            result, requestedId, workspace));
+    }
+
     [Fact]
     public void RecentHistoryResponseIsBoundedAndExposesOnlySafeRowMetadata()
     {

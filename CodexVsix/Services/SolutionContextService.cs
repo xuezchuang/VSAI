@@ -45,11 +45,18 @@ public sealed class SolutionContextService
     public string? TryGetSolutionDirectory()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        var solutionPath = TryGetSolutionFilePath();
+        return solutionPath is null ? null : Path.GetDirectoryName(solutionPath);
+    }
+
+    public string? TryGetSolutionFilePath()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
         var dte = Package.GetGlobalService(typeof(DTE)) as DTE;
         var solutionPath = dte?.Solution?.FullName;
         if (!string.IsNullOrWhiteSpace(solutionPath) && File.Exists(solutionPath))
         {
-            return Path.GetDirectoryName(solutionPath);
+            return solutionPath;
         }
 
         return null;

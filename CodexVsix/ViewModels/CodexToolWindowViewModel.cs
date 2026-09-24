@@ -17,6 +17,7 @@ using System.Windows.Media.Imaging;
 using CodexVsix.Models;
 using CodexVsix.Services;
 using CodexVsix.UI;
+using EnvDTE;
 using Microsoft.Win32;
 using Microsoft.VisualStudio.Shell;
 using Newtonsoft.Json.Linq;
@@ -46,6 +47,9 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
     private readonly CodexProcessService _codexProcessService = new();
     private readonly CodexEnvironmentService _codexEnvironmentService = new();
     private readonly SolutionContextService _solutionContextService = new();
+    private SolutionEvents? _solutionEvents;
+    private string _activeSolutionPath = string.Empty;
+    private bool _pendingSolutionSync;
     private readonly object _assistantOutputSync = new();
     private readonly StringBuilder _assistantOutputBuffer = new();
     private readonly ComposerSubmissionBuffer _composerSubmissions = new(MaxPendingFollowUpPrompts);
@@ -221,6 +225,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
 
         RefreshMentions();
         UpdateContextEstimate();
+        SubscribeSolutionEvents();
         InitializeSafeAsync().FileAndForget("CodexVsix/Initialize");
     }
 
@@ -236,6 +241,16 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
 
     public void Dispose()
     {
+        if (_solutionEvents is not null)
+        {
+            var solutionEvents = _solutionEvents;
+            _solutionEvents = null;
+            ThreadHelper.JoinableTaskFactory.Run(async delegate
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                solutionEvents.Opened -= OnSolutionOpened;
+            });
+        }
         _approvalDecisionTcs?.TrySetResult(JValue.CreateString("cancel"));
         _userInputDecisionTcs?.TrySetResult(new JObject { ["answers"] = new JObject() });
         _cts?.Cancel();
@@ -1613,6 +1628,11 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
                 _cts = null;
                 IsStopping = false;
                 IsBusy = false;
+                if (_pendingSolutionSync)
+                {
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    SyncSolutionWorkingDirectory();
+                }
                 // Reset already discarded the old conversation's queue. A directory switch
                 // may have queued new, explicitly submitted work while this turn was ending.
                 SendQueuedFollowUpIfAvailable();
@@ -2147,8 +2167,19 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
             throw new InvalidOperationException("Wait for the current response to finish before changing the working folder.");
         }
 
-        var changed = CodexWorkingDirectory.Select(
-            Settings, directory, followSolutionDirectory, settings => _settingsStore.Save(settings));
+        var solutionPath = _solutionContextService.TryGetSolutionFilePath();
+        var changed = CodexWorkingDirectory.Select(Settings, directory, followSolutionDirectory, settings =>
+        {
+            if (solutionPath is null)
+            {
+                _settingsStore.Save(settings);
+            }
+            else
+            {
+                _settingsStore.UpdateSolutionWorkingDirectory(settings, solutionPath,
+                    followSolutionDirectory ? null : settings.WorkingDirectory);
+            }
+        });
         if (changed)
         {
             _solutionContextService.InvalidateFileIndex();
@@ -2174,6 +2205,21 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
     private void ApplyStartupWorkingDirectory()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        var solutionPath = _solutionContextService.TryGetSolutionFilePath();
+        if (solutionPath is not null)
+        {
+            _activeSolutionPath = CodexWorkingDirectory.Resolve(solutionPath);
+            var currentSolutionDirectory = Path.GetDirectoryName(solutionPath)!;
+            Settings.FollowSolutionDirectory = !Settings.SolutionWorkingDirectories.ContainsKey(_activeSolutionPath);
+            var selectedDirectory = CodexWorkingDirectory.ResolveForSolution(Settings, solutionPath, currentSolutionDirectory);
+            if (!string.Equals(Settings.WorkingDirectory, selectedDirectory, StringComparison.OrdinalIgnoreCase))
+            {
+                ApplyWorkingDirectory(selectedDirectory, resetConversation: true);
+                OnPropertyChanged(nameof(Settings));
+            }
+            return;
+        }
+
         if (!Settings.FollowSolutionDirectory)
         {
             return;
@@ -2193,6 +2239,75 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         ApplyWorkingDirectory(CodexWorkingDirectory.Resolve(Settings, solutionDirectory), resetConversation: true);
         OnPropertyChanged(nameof(Settings));
         _settingsStore.Save(Settings);
+    }
+
+    private void SubscribeSolutionEvents()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        var dte = Package.GetGlobalService(typeof(DTE)) as DTE;
+        _solutionEvents = dte?.Events.SolutionEvents;
+        if (_solutionEvents is not null)
+        {
+            _solutionEvents.Opened += OnSolutionOpened;
+        }
+    }
+
+    private void OnSolutionOpened()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        if (IsBusy)
+        {
+            _pendingSolutionSync = true;
+            return;
+        }
+
+        SyncSolutionWorkingDirectory();
+    }
+
+    private void SyncSolutionWorkingDirectory()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        _pendingSolutionSync = false;
+        var solutionPath = _solutionContextService.TryGetSolutionFilePath();
+        if (solutionPath is null)
+        {
+            return;
+        }
+
+        var latest = _settingsStore.Load();
+        if (!string.IsNullOrWhiteSpace(_settingsStore.LastLoadError))
+        {
+            AppendOutput("[settings] " + _settingsStore.LastLoadError + Environment.NewLine);
+            return;
+        }
+
+        Settings.SolutionWorkingDirectories = latest.SolutionWorkingDirectories;
+        var key = CodexWorkingDirectory.Resolve(solutionPath);
+        var selectedDirectory = CodexWorkingDirectory.ResolveForSolution(Settings, solutionPath,
+            Path.GetDirectoryName(solutionPath)!);
+        var solutionChanged = !string.Equals(_activeSolutionPath, key, StringComparison.OrdinalIgnoreCase);
+        var directoryChanged = !string.Equals(Settings.WorkingDirectory, selectedDirectory, StringComparison.OrdinalIgnoreCase);
+        Settings.FollowSolutionDirectory = !Settings.SolutionWorkingDirectories.ContainsKey(key);
+        _activeSolutionPath = key;
+        if (solutionChanged || directoryChanged)
+        {
+            ApplyWorkingDirectory(selectedDirectory, resetConversation: true);
+        }
+
+        OnPropertyChanged(nameof(Settings));
+        OnPropertyChanged(nameof(WorkspaceDirectory));
+        if (!solutionChanged && !directoryChanged)
+        {
+            return;
+        }
+
+        WorkingDirectoryChanged?.Invoke(this, EventArgs.Empty);
+        RunDetached(async delegate
+        {
+            await RefreshThreadsAsync(null).ConfigureAwait(false);
+            await RefreshModelOptionsAsync().ConfigureAwait(false);
+            await RefreshServerSurfacesAsync(forceSkillReload: true).ConfigureAwait(false);
+        }, "CodexVsix/RefreshWorkspace");
     }
 
     private void ApplyWorkingDirectory(string workingDirectory, bool resetConversation)

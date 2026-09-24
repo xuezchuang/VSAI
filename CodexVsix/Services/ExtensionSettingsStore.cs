@@ -115,9 +115,47 @@ public sealed class ExtensionSettingsStore
             {
                 settings.Providers = existing.Providers;
             }
+            // Solution folders are edited under this mutex by UpdateSolutionWorkingDirectory.
+            // An unrelated save from another VS instance must not restore a stale map.
+            if (hadStoredSettings && existing is not null)
+            {
+                settings.SolutionWorkingDirectories = existing.SolutionWorkingDirectories;
+            }
 
             var json = SerializeForStorage(settings);
             WriteAtomically(json);
+        }
+        finally
+        {
+            mutex.ReleaseMutex();
+        }
+    }
+
+    internal void UpdateSolutionWorkingDirectory(CodexExtensionSettings settings, string solutionPath, string? customDirectory)
+    {
+        Directory.CreateDirectory(_settingsDirectory);
+        using var mutex = new Mutex(false, _settingsMutexName);
+        if (!WaitForMutex(mutex))
+        {
+            throw new IOException("Timed out while saving the solution working folder.");
+        }
+
+        try
+        {
+            var latest = LoadWithoutLock();
+            var key = CodexWorkingDirectory.Resolve(solutionPath);
+            if (customDirectory is null)
+            {
+                latest.SolutionWorkingDirectories.Remove(key);
+            }
+            else
+            {
+                latest.SolutionWorkingDirectories[key] = CodexWorkingDirectory.Resolve(customDirectory);
+            }
+
+            WriteAtomically(SerializeForStorage(latest));
+            settings.SolutionWorkingDirectories = new Dictionary<string, string>(
+                latest.SolutionWorkingDirectories, StringComparer.OrdinalIgnoreCase);
         }
         finally
         {
@@ -262,6 +300,9 @@ public sealed class ExtensionSettingsStore
         settings.CodexExecutablePath ??= "codex.cmd";
         settings.LanguageOverride ??= string.Empty;
         settings.WorkingDirectory ??= string.Empty;
+        settings.SolutionWorkingDirectories = settings.SolutionWorkingDirectories is null
+            ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, string>(settings.SolutionWorkingDirectories, StringComparer.OrdinalIgnoreCase);
         settings.DefaultModel ??= string.Empty;
         settings.ReasoningEffort ??= string.Empty;
         settings.ModelVerbosity ??= string.Empty;

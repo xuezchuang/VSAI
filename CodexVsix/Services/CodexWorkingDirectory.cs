@@ -15,6 +15,16 @@ internal static class CodexWorkingDirectory
         return Resolve(directory);
     }
 
+    public static string ResolveForSolution(CodexExtensionSettings settings, string solutionPath, string solutionDirectory)
+    {
+        var key = Normalize(solutionPath);
+        return settings.SolutionWorkingDirectories is not null
+            && settings.SolutionWorkingDirectories.TryGetValue(key, out var selectedDirectory)
+            && !string.IsNullOrWhiteSpace(selectedDirectory)
+                ? Resolve(selectedDirectory)
+                : Resolve(solutionDirectory);
+    }
+
     public static string Resolve(string? directory)
     {
         // Keep an explicit choice even if a removable drive is temporarily unavailable.

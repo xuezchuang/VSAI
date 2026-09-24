@@ -92,7 +92,13 @@
             historyLocalPlural: 'local conversations',
             historyMoreAvailable: 'More conversations are available.',
             historyLoadMore: 'Load more',
-            historyLoadingMore: 'Loading more...'
+            historyLoadingMore: 'Loading more...',
+            historyDelete: 'Delete',
+            historyDeleteConfirm: 'Remove this conversation from task history?',
+            historyDeleteAction: 'Remove',
+            historyDeleteCancel: 'Cancel',
+            historyDeleting: 'Removing...',
+            historyDeleteError: 'Could not remove this conversation.'
         };
         if (language.startsWith('pt')) {
             return Object.assign(strings, {
@@ -108,7 +114,13 @@
                 historyLocalPlural: 'conversas locais',
                 historyMoreAvailable: 'Há mais conversas disponíveis.',
                 historyLoadMore: 'Carregar mais',
-                historyLoadingMore: 'Carregando mais...'
+                historyLoadingMore: 'Carregando mais...',
+                historyDelete: 'Excluir',
+                historyDeleteConfirm: 'Remover esta conversa do histórico de tarefas?',
+                historyDeleteAction: 'Remover',
+                historyDeleteCancel: 'Cancelar',
+                historyDeleting: 'Removendo...',
+                historyDeleteError: 'Não foi possível remover esta conversa.'
             });
         }
         return strings;
@@ -168,7 +180,7 @@
             '.codex-vs-history-close:hover, .codex-vs-history-row:hover {',
             '  background: var(--vscode-list-hoverBackground, rgba(127,127,127,.16));',
             '}',
-            '.codex-vs-history-close:focus-visible, .codex-vs-history-row:focus-visible, .codex-vs-history-retry:focus-visible, .codex-vs-history-search:focus-visible {',
+            '.codex-vs-history-close:focus-visible, .codex-vs-history-row:focus-visible, .codex-vs-history-delete:focus-visible, .codex-vs-history-confirm button:focus-visible, .codex-vs-history-retry:focus-visible, .codex-vs-history-search:focus-visible {',
             '  outline: 2px solid var(--vscode-focusBorder, #007fd4);',
             '  outline-offset: -1px;',
             '}',
@@ -198,9 +210,16 @@
             '  flex-direction: column;',
             '  gap: 2px;',
             '}',
+            '.codex-vs-history-entry {',
+            '  display: flex;',
+            '  flex-wrap: wrap;',
+            '  align-items: center;',
+            '  border-radius: 8px;',
+            '}',
             '.codex-vs-history-row {',
             '  display: flex;',
-            '  width: 100%;',
+            '  flex: 1 1 0;',
+            '  min-width: 0;',
             '  flex-direction: column;',
             '  align-items: stretch;',
             '  gap: 3px;',
@@ -212,6 +231,36 @@
             '  cursor: pointer;',
             '  font: inherit;',
             '  text-align: start;',
+            '}',
+            '.codex-vs-history-delete, .codex-vs-history-confirm button {',
+            '  border: 0;',
+            '  border-radius: 6px;',
+            '  padding: 5px 7px;',
+            '  color: var(--vscode-descriptionForeground, var(--token-description-foreground, #aaa));',
+            '  background: transparent;',
+            '  cursor: pointer;',
+            '  font: inherit;',
+            '  font-size: 11px;',
+            '}',
+            '.codex-vs-history-delete:hover, .codex-vs-history-confirm button:hover {',
+            '  color: inherit;',
+            '  background: var(--vscode-list-hoverBackground, rgba(127,127,127,.16));',
+            '}',
+            '.codex-vs-history-delete:disabled, .codex-vs-history-confirm button:disabled {',
+            '  cursor: default;',
+            '  opacity: .55;',
+            '}',
+            '.codex-vs-history-confirm {',
+            '  display: flex;',
+            '  flex: 0 0 100%;',
+            '  flex-wrap: wrap;',
+            '  align-items: center;',
+            '  gap: 4px;',
+            '  padding: 0 9px 7px;',
+            '  font-size: 11px;',
+            '}',
+            '.codex-vs-history-confirm button:first-of-type, .codex-vs-history-delete-error {',
+            '  color: var(--vscode-errorForeground, #f48771);',
             '}',
             '.codex-vs-history-row-title {',
             '  overflow: hidden;',
@@ -319,6 +368,11 @@
     let recentHistoryPrefetchRequestId = null;
     let recentHistoryPrefetchWorkspaceEpoch = null;
     let recentHistoryPrefetchAttemptedWorkspaceEpoch = null;
+    let recentHistoryArchiveRequestId = null;
+    let recentHistoryArchiveThreadId = null;
+    let recentHistoryArchiveWorkspaceEpoch = null;
+    let recentHistoryArchiveConfirmId = null;
+    let recentHistoryArchiveErrorId = null;
 
     function normalizeHistorySearchValue(value) {
         const text = String(value || '').toLowerCase();
@@ -416,6 +470,8 @@
         recentHistoryRequestWorkspaceEpoch = null;
         recentHistoryRequestSearchTerm = '';
         recentHistorySearchTerm = '';
+        recentHistoryArchiveConfirmId = null;
+        recentHistoryArchiveErrorId = null;
         if (recentHistorySearchDebounceTimer !== null) {
             clearTimeout(recentHistorySearchDebounceTimer);
             recentHistorySearchDebounceTimer = null;
@@ -485,6 +541,8 @@
             return;
         }
         recentHistorySearchTerm = nextSearchTerm;
+        recentHistoryArchiveConfirmId = null;
+        recentHistoryArchiveErrorId = null;
         if (recentHistoryRequestId !== null && recentHistoryRequestSearchTerm !== nextSearchTerm) {
             recentHistoryRequestId = null;
             recentHistoryRequestWorkspaceEpoch = null;
@@ -559,6 +617,9 @@
         } else {
             const fragment = document.createDocumentFragment();
             filteredItems.forEach(function (item) {
+                const entry = document.createElement('div');
+                entry.className = 'codex-vs-history-entry';
+                entry.setAttribute('role', 'listitem');
                 const row = document.createElement('button');
                 row.type = 'button';
                 row.className = 'codex-vs-history-row';
@@ -587,7 +648,64 @@
                         path: '/local/' + encodeURIComponent(item.id)
                     });
                 });
-                fragment.appendChild(row);
+                entry.appendChild(row);
+
+                const remove = document.createElement('button');
+                remove.type = 'button';
+                remove.className = 'codex-vs-history-delete';
+                remove.setAttribute('aria-label', strings.historyDelete + ': ' + (item.title || strings.historyUntitled));
+                remove.textContent = recentHistoryArchiveThreadId === item.id
+                    ? strings.historyDeleting : strings.historyDelete;
+                remove.disabled = recentHistoryArchiveRequestId !== null;
+                remove.addEventListener('click', function () {
+                    recentHistoryArchiveConfirmId = item.id;
+                    recentHistoryArchiveErrorId = null;
+                    renderRecentHistory();
+                });
+                entry.appendChild(remove);
+
+                if (recentHistoryArchiveConfirmId === item.id) {
+                    const confirm = document.createElement('div');
+                    confirm.className = 'codex-vs-history-confirm';
+                    const prompt = document.createElement('span');
+                    prompt.textContent = strings.historyDeleteConfirm;
+                    confirm.appendChild(prompt);
+                    const archive = document.createElement('button');
+                    archive.type = 'button';
+                    archive.textContent = strings.historyDeleteAction;
+                    archive.disabled = recentHistoryArchiveRequestId !== null;
+                    archive.addEventListener('click', function () {
+                        if (recentHistoryArchiveRequestId !== null) return;
+                        recentHistoryArchiveRequestId = appSessionId + '-archive-' + (++recentHistoryRequestSequence);
+                        recentHistoryArchiveThreadId = item.id;
+                        recentHistoryArchiveWorkspaceEpoch = recentHistoryWorkspaceEpoch;
+                        postToHost({
+                            type: 'recent-history-archive',
+                            requestId: recentHistoryArchiveRequestId,
+                            threadId: item.id
+                        });
+                        renderRecentHistory();
+                    });
+                    confirm.appendChild(archive);
+                    const cancel = document.createElement('button');
+                    cancel.type = 'button';
+                    cancel.textContent = strings.historyDeleteCancel;
+                    cancel.disabled = recentHistoryArchiveRequestId !== null;
+                    cancel.addEventListener('click', function () {
+                        recentHistoryArchiveConfirmId = null;
+                        renderRecentHistory();
+                    });
+                    confirm.appendChild(cancel);
+                    entry.appendChild(confirm);
+                }
+                if (recentHistoryArchiveErrorId === item.id) {
+                    const error = document.createElement('div');
+                    error.className = 'codex-vs-history-confirm codex-vs-history-delete-error';
+                    error.setAttribute('role', 'alert');
+                    error.textContent = strings.historyDeleteError;
+                    entry.appendChild(error);
+                }
+                fragment.appendChild(entry);
             });
             elements.list.appendChild(fragment);
             elements.status.hidden = true;
@@ -742,6 +860,34 @@
         recentHistoryItemsSearchTerm = recentHistoryRequestSearchTerm;
         cacheRecentHistoryFirstPage();
         renderRecentHistory();
+    }
+
+    function handleRecentHistoryArchiveResponse(data) {
+        if (data.requestId !== recentHistoryArchiveRequestId ||
+            data.threadId !== recentHistoryArchiveThreadId) return;
+        const threadId = recentHistoryArchiveThreadId;
+        const sameWorkspace = recentHistoryArchiveWorkspaceEpoch === recentHistoryWorkspaceEpoch;
+        recentHistoryArchiveRequestId = null;
+        recentHistoryArchiveThreadId = null;
+        recentHistoryArchiveWorkspaceEpoch = null;
+        recentHistoryArchiveConfirmId = null;
+        if (!sameWorkspace) return;
+        if (data.ok !== true) {
+            recentHistoryArchiveErrorId = threadId;
+            renderRecentHistory();
+            return;
+        }
+        recentHistoryArchiveErrorId = null;
+        recentHistoryItems = recentHistoryItems.filter(function (item) { return item.id !== threadId; });
+        invalidateRecentHistoryCache();
+        recentHistoryRequestId = null;
+        recentHistoryRequestWorkspaceEpoch = null;
+        recentHistoryLoading = false;
+        if (recentHistoryRoot) {
+            requestRecentHistory(null, false, recentHistorySearchTerm);
+        } else {
+            startRecentHistoryPrefetch();
+        }
     }
 
     function normalizeRecentHistoryItems(items) {
@@ -956,8 +1102,13 @@
         }
         if (data.type === 'recent-history-response') {
             handleRecentHistoryResponse(data);
+        } else if (data.type === 'recent-history-archive-response') {
+            handleRecentHistoryArchiveResponse(data);
         } else if (data.type === 'active-workspace-roots-updated') {
             invalidateRecentHistoryCache();
+            recentHistoryArchiveRequestId = null;
+            recentHistoryArchiveThreadId = null;
+            recentHistoryArchiveWorkspaceEpoch = null;
             closeRecentHistory(false);
             startRecentHistoryPrefetch();
         } else if (data.type === 'navigate-to-route' && recentHistoryRoot) {

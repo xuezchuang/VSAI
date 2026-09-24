@@ -397,4 +397,61 @@ findByClass(root, 'codex-vs-history-close')[0].dispatchEvent(event('click'));
 await waitForSearchDebounce();
 assert.equal(hostMessages('recent-history-request').length, requestCountBeforeClose, 'closing the dialog must cancel a pending search debounce');
 
-console.log('Codex history shim pagination, deduplication, retry, and directory invalidation checks passed.');
+root = openHistory();
+requests = hostMessages('recent-history-request');
+sendHistoryResponse(requests.at(-1), {
+    items: [{ id: 'keep', title: 'Keep task' }, { id: 'remove', title: 'Remove task' }],
+    hasMore: false, nextCursor: null
+});
+let deleteButtons = findByClass(root, 'codex-vs-history-delete');
+assert.equal(deleteButtons.length, 2, 'each history row needs its own delete action');
+const routeCountBeforeDelete = hostMessages('navigate-to-route').length;
+deleteButtons[1].dispatchEvent(event('click'));
+assert.equal(hostMessages('recent-history-archive').length, 0, 'the first click must only ask for confirmation');
+assert.equal(hostMessages('navigate-to-route').length, routeCountBeforeDelete, 'delete must not open the conversation');
+let confirmation = findByClass(root, 'codex-vs-history-confirm')[0];
+assert.match(confirmation.textContent, /Remove this conversation/);
+confirmation.children[2].dispatchEvent(event('click'));
+assert.equal(hostMessages('recent-history-archive').length, 0, 'cancel must not archive the task');
+findByClass(root, 'codex-vs-history-delete')[1].dispatchEvent(event('click'));
+confirmation = findByClass(root, 'codex-vs-history-confirm')[0];
+confirmation.children[1].dispatchEvent(event('click'));
+let archives = hostMessages('recent-history-archive');
+assert.equal(archives.length, 1);
+assert.equal(archives[0].threadId, 'remove');
+assert.equal(findByClass(root, 'codex-vs-history-delete')[0].disabled, true, 'archive cannot be submitted twice');
+window.dispatchEvent(event('message', { data: {
+    type: 'recent-history-archive-response', requestId: 'wrong', threadId: 'remove', ok: true
+} }));
+assert.equal(findByClass(root, 'codex-vs-history-row').length, 2, 'unmatched responses must be ignored');
+window.dispatchEvent(event('message', { data: {
+    type: 'recent-history-archive-response', requestId: archives[0].requestId, threadId: 'remove', ok: false
+} }));
+assert.equal(findByClass(root, 'codex-vs-history-row').length, 2, 'failed archives must keep the row');
+assert.equal(findByClass(root, 'codex-vs-history-delete-error').length, 1, 'failed archives need a visible error');
+findByClass(root, 'codex-vs-history-delete')[1].dispatchEvent(event('click'));
+findByClass(root, 'codex-vs-history-confirm')[0].children[1].dispatchEvent(event('click'));
+archives = hostMessages('recent-history-archive');
+window.dispatchEvent(event('message', { data: {
+    type: 'recent-history-archive-response', requestId: archives.at(-1).requestId, threadId: 'remove', ok: true
+} }));
+assert.deepEqual(findByClass(root, 'codex-vs-history-row').map(row => row.children[0].textContent), ['Keep task']);
+requests = hostMessages('recent-history-request');
+assert.equal(requests.at(-1).cursor, null, 'successful archive must refresh history from the first page');
+sendHistoryResponse(requests.at(-1), { items: [{ id: 'keep', title: 'Keep task' }], hasMore: false, nextCursor: null });
+assert.deepEqual(findByClass(root, 'codex-vs-history-row').map(row => row.children[0].textContent), ['Keep task']);
+
+findByClass(root, 'codex-vs-history-delete')[0].dispatchEvent(event('click'));
+findByClass(root, 'codex-vs-history-confirm')[0].children[1].dispatchEvent(event('click'));
+const oldWorkspaceArchive = hostMessages('recent-history-archive').at(-1);
+window.dispatchEvent(event('message', { data: { type: 'active-workspace-roots-updated' } }));
+root = openHistory();
+requests = hostMessages('recent-history-request');
+sendHistoryResponse(requests.at(-1), { items: [{ id: 'other', title: 'Other workspace' }], hasMore: false, nextCursor: null });
+window.dispatchEvent(event('message', { data: {
+    type: 'recent-history-archive-response', requestId: oldWorkspaceArchive.requestId, threadId: 'keep', ok: true
+} }));
+assert.deepEqual(findByClass(root, 'codex-vs-history-row').map(row => row.children[0].textContent), ['Other workspace'],
+    'an old workspace archive response must not change the new workspace history');
+
+console.log('Codex history shim pagination, workspace isolation, and archive interaction checks passed.');

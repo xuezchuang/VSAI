@@ -74,6 +74,35 @@ public sealed class ExtensionSettingsStoreTests
     }
 
     [Fact]
+    public void SolutionFolderUpdatesFromDifferentInstancesRemainIndependent()
+    {
+        using var temp = new TemporaryDirectory();
+        var file = Path.Combine(temp.Path, "settings.json");
+        var mutex = "Local\\CodexVsix.Tests." + Guid.NewGuid().ToString("N");
+        var firstStore = new ExtensionSettingsStore(file, mutex);
+        var secondStore = new ExtensionSettingsStore(file, mutex);
+        var first = firstStore.Load();
+        var second = secondStore.Load();
+        var firstSolution = Path.Combine(temp.Path, "first.sln");
+        var secondSolution = Path.Combine(temp.Path, "second.sln");
+        var firstFolder = Path.Combine(temp.Path, "first-folder");
+        var secondFolder = Path.Combine(temp.Path, "second-folder");
+
+        firstStore.UpdateSolutionWorkingDirectory(first, firstSolution, firstFolder);
+        secondStore.UpdateSolutionWorkingDirectory(second, secondSolution, secondFolder);
+        firstStore.Save(first);
+
+        var reloaded = firstStore.Load();
+        Assert.Equal(firstFolder, reloaded.SolutionWorkingDirectories[firstSolution]);
+        Assert.Equal(secondFolder, reloaded.SolutionWorkingDirectories[secondSolution]);
+
+        firstStore.UpdateSolutionWorkingDirectory(first, firstSolution, null);
+        reloaded = secondStore.Load();
+        Assert.False(reloaded.SolutionWorkingDirectories.ContainsKey(firstSolution));
+        Assert.Equal(secondFolder, reloaded.SolutionWorkingDirectories[secondSolution]);
+    }
+
+    [Fact]
     public void SaveCanExplicitlyClearPromptHistoryWithoutMergingItBackFromDisk()
     {
         using var temp = new TemporaryDirectory();

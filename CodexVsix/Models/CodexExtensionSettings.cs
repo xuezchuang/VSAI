@@ -11,6 +11,7 @@ public sealed class CodexExtensionSettings
     public string LanguageOverride { get; set; } = "";
     public string WorkingDirectory { get; set; } = "";
     public bool FollowSolutionDirectory { get; set; } = true;
+    public Dictionary<string, string> SolutionWorkingDirectories { get; set; } = new(System.StringComparer.OrdinalIgnoreCase);
     public string DefaultModel { get; set; } = "";
     public string ReasoningEffort { get; set; } = "";
     public string ModelVerbosity { get; set; } = "";

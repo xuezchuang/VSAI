@@ -158,6 +158,87 @@ public sealed class CodexProviderModelCatalogFileTests
         Assert.Single(Directory.EnumerateFiles(temp.Path));
     }
 
+    [Fact]
+    public void UniqueDiscoveredMetadataIsAppliedToRuntimeCatalog()
+    {
+        var provider = AutomaticProvider(new CodexProviderModelMetadata
+        {
+            Id = "discovered-model", DisplayName = "Discovered Model", ContextWindow = 400_000,
+            SupportsImages = true, SupportsTools = true, SupportsResponses = true, SupportsReasoning = true,
+            ReasoningEfforts = new() { "minimal", "high" }, DefaultReasoningEffort = "high",
+            MaxOutputTokens = 64_000
+        });
+
+        var merged = CodexProviderModelCatalogFile.Merge(
+            Baseline(), new CodexExtensionSettings { Providers = { provider } })!;
+        var model = merged["models"]!.Single(item => item["slug"]!.Value<string>() == "discovered-model");
+
+        Assert.Equal("Discovered Model", model["display_name"]!.Value<string>());
+        Assert.Equal(400_000L, model["context_window"]!.Value<long>());
+        Assert.Equal(new[] { "minimal", "high" }, model["supported_reasoning_levels"]!
+            .Select(item => item["effort"]!.Value<string>()));
+        Assert.Equal(new[] { "text", "image" }, model["input_modalities"]!.Values<string>());
+        Assert.True(model["supports_reasoning_summaries"]!.Value<bool>());
+        Assert.False(model["supports_parallel_tool_calls"]!.Value<bool>());
+        Assert.Null(model["max_output_tokens"]);
+    }
+
+    [Fact]
+    public void DiscoveredOfficialAndCrossProviderCollisionsPreserveNativeMetadataWithoutThrowing()
+    {
+        var officialCollision = AutomaticProvider(new CodexProviderModelMetadata
+        {
+            Id = "official-model", ContextWindow = 999_999, SupportsTools = true, SupportsResponses = true
+        });
+        var first = AutomaticProvider(new CodexProviderModelMetadata
+        {
+            Id = "ambiguous-model", ContextWindow = 100_000, SupportsTools = true, SupportsResponses = true
+        });
+        var second = AutomaticProvider(new CodexProviderModelMetadata
+        {
+            Id = "ambiguous-model", ContextWindow = 200_000, SupportsTools = true, SupportsResponses = true
+        });
+        var safe = AutomaticProvider(new CodexProviderModelMetadata
+        {
+            Id = "safe-model", ContextWindow = 300_000, SupportsTools = true, SupportsResponses = true
+        });
+        var baseline = Baseline();
+
+        var merged = CodexProviderModelCatalogFile.Merge(
+            baseline, new CodexExtensionSettings { Providers = { officialCollision, first, second, safe } })!;
+
+        Assert.Equal(2, merged["models"]!.Count());
+        Assert.Equal(272_000L, merged["models"]![0]!["context_window"]!.Value<long>());
+        Assert.DoesNotContain(merged["models"]!, item => item["slug"]!.Value<string>() == "ambiguous-model");
+        Assert.Contains(merged["models"]!, item => item["slug"]!.Value<string>() == "safe-model");
+    }
+
+    [Fact]
+    public void DiscoveredCapacityIsSkippedWhenAnotherProviderHasUnknownMetadataForSameId()
+    {
+        var known = AutomaticProvider(new CodexProviderModelMetadata
+        {
+            Id = "shared-model", ContextWindow = 300_000, SupportsTools = true, SupportsResponses = true
+        });
+        var unknown = AutomaticProvider(new CodexProviderModelMetadata { Id = "shared-model" });
+
+        Assert.Null(CodexProviderModelCatalogFile.Merge(
+            Baseline(), new CodexExtensionSettings { Providers = { known, unknown } }));
+    }
+
+    [Fact]
+    public void MetadataWithoutContextDoesNotReplaceNativeFallbackModelInfo()
+    {
+        var provider = AutomaticProvider(new CodexProviderModelMetadata
+        {
+            Id = "image-model", SupportsImages = true, SupportsTools = true, SupportsResponses = true
+        });
+        var settings = new CodexExtensionSettings { Providers = { provider } };
+
+        Assert.False(CodexProviderModelCatalogFile.HasOverrides(settings));
+        Assert.Null(CodexProviderModelCatalogFile.Merge(Baseline(), settings));
+    }
+
     private static CodexExtensionSettings Settings(string model = "custom-model")
         => new() { Providers = { Provider(model) } };
 
@@ -168,6 +249,13 @@ public sealed class CodexProviderModelCatalogFileTests
             ContextWindows = { [model] = 1_048_576 },
             ReasoningEfforts = { [model] = new() { "low", "high", "max" } },
             DefaultReasoningEfforts = { [model] = "max" }
+        };
+
+    private static CodexProviderConfiguration AutomaticProvider(CodexProviderModelMetadata metadata)
+        => new()
+        {
+            Name = "Automatic provider",
+            Catalog = new CodexProviderCatalogConfiguration { DiscoveredModels = { metadata } }
         };
 
     private static JObject Baseline() => JObject.Parse(@"{

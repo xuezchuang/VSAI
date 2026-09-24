@@ -12,7 +12,7 @@ internal static class CodexProviderModelCatalog
     internal const string AliasPrefix = "vsai:";
     private static readonly string[] RequestedReasoningEfforts = { "low", "medium", "high", "xhigh", "max" };
 
-    private static IReadOnlyList<string> ReasoningEfforts(CodexProviderConfiguration provider, string model)
+    private static IReadOnlyList<string> LegacyReasoningEfforts(CodexProviderConfiguration provider, string model)
     {
         if (provider.ReasoningEfforts?.TryGetValue(model, out var configured) == true && configured is not null)
         {
@@ -25,8 +25,40 @@ internal static class CodexProviderModelCatalog
         return RequestedReasoningEfforts;
     }
 
+    internal static IReadOnlyList<CodexProviderModelMetadata> GetEligibleModels(CodexProviderConfiguration provider)
+    {
+        if (provider.Catalog is not null)
+            return CodexProviderCatalogConfigurationService.GetEffectiveModels(provider)
+                .Where(IsEligibleCodingModel).ToArray();
+
+        // Reading the picker must not migrate legacy settings. Their historical request-control
+        // fallback remains intact until the settings service explicitly creates a Catalog.
+        return (provider.Models ?? new List<string>()).Where(model => !string.IsNullOrWhiteSpace(model))
+            .Distinct(StringComparer.Ordinal).Select(model => new CodexProviderModelMetadata
+            {
+                Id = model,
+                ContextWindow = provider.ContextWindows?.TryGetValue(model, out var window) == true ? window : null,
+                ReasoningEfforts = LegacyReasoningEfforts(provider, model).ToList(),
+                DefaultReasoningEffort = provider.DefaultReasoningEfforts?.TryGetValue(model, out var effort) == true
+                    ? effort : null
+            }).ToArray();
+    }
+
+    private static bool IsEligibleCodingModel(CodexProviderModelMetadata model)
+        => model.SupportsResponses != false && model.SupportsTools != false;
+
     internal static string Alias(CodexProviderConfiguration provider, string model)
         => AliasPrefix + provider.Id + "/" + model;
+
+    internal static string? FirstAvailableAlias(CodexExtensionSettings settings)
+    {
+        foreach (var provider in settings.Providers)
+        {
+            var first = GetEligibleModels(provider).FirstOrDefault();
+            if (first is not null) return Alias(provider, first.Id);
+        }
+        return null;
+    }
 
     internal static Selection? Resolve(CodexExtensionSettings settings, string? model)
     {
@@ -37,7 +69,7 @@ internal static class CodexProviderModelCatalog
         var provider = settings.Providers.FirstOrDefault(p => p is not null
             && model.StartsWith(AliasPrefix + p.Id + "/", StringComparison.Ordinal));
         var realModel = provider is null ? null : model.Substring(AliasPrefix.Length + provider.Id.Length + 1);
-        if (provider is null || !provider.Models.Contains(realModel!, StringComparer.Ordinal))
+        if (provider is null || !GetEligibleModels(provider).Any(item => item.Id == realModel))
             throw new InvalidOperationException("所选服务或模型已被移除，请重新选择模型。");
         CodexProviderConfigurationService.Validate(provider);
         return new Selection(CodexProviderConfigurationService.GetProviderId(provider), realModel!, model);
@@ -47,55 +79,84 @@ internal static class CodexProviderModelCatalog
     {
         var provider = settings.Providers.FirstOrDefault(p =>
             string.Equals("vsai_" + p.Id, providerId, StringComparison.Ordinal));
-        return provider is not null && provider.Models.Contains(model, StringComparer.Ordinal)
+        return provider is not null && GetEligibleModels(provider).Any(item => item.Id == model)
             ? Alias(provider, model) : model;
     }
 
-    internal static JToken? Merge(CodexExtensionSettings settings, JToken? result, bool hasOfficialAccount)
+    internal static JToken? Merge(CodexExtensionSettings settings, JToken? result, bool hasChatGptLogin, bool includeProviderModels = true)
     {
-        if (settings.Providers.Count == 0) return result;
+        if (settings.Providers.Count == 0 && hasChatGptLogin) return result;
         var response = result?.DeepClone() as JObject ?? new JObject();
         var models = (JArray)(response["data"] as JArray ?? response["models"] as JArray ?? new JArray()).DeepClone();
+        // Authentication controls access, not catalog visibility. A fresh private home
+        // has no ChatGPT login yet, but must still expose the official model choices.
         // The execution catalog contains real custom IDs. Only provider-qualified aliases
         // belong in the picker; a bare custom ID would otherwise route back to OpenAI.
-        var capacityModels = new HashSet<string>(settings.Providers.SelectMany(provider =>
-            provider.Models.Where(model => provider.ContextWindows?.ContainsKey(model) == true)), StringComparer.Ordinal);
+        var capacityModels = new HashSet<string>(settings.Providers.Where(provider => provider.Catalog is null)
+            .SelectMany(provider => (provider.Models ?? new List<string>()).Where(model =>
+                provider.ContextWindows?.ContainsKey(model) == true)), StringComparer.Ordinal);
         foreach (var model in models.OfType<JObject>().Where(model =>
             capacityModels.Contains(model["model"]?.Value<string>() ?? string.Empty)).ToArray())
             model.Remove();
-        // Only append on the first page: pagination must not repeat the custom models.
-        foreach (var provider in settings.Providers)
-        foreach (var model in provider.Models.Distinct(StringComparer.Ordinal))
+        // A static runtime catalog exposes its real IDs through model/list. Hide only entries
+        // generated by this extension; native models with the same ID keep their original row.
+        foreach (var model in models.OfType<JObject>().Where(model =>
+            string.Equals(model["description"]?.Value<string>(),
+                CodexProviderModelCatalogFile.RuntimeDescription, StringComparison.Ordinal)).ToArray())
+            model.Remove();
+        // Custom models belong on the first page only; never add them to a continuation page.
+        if (includeProviderModels)
         {
-            var alias = Alias(provider, model);
-            if (models.Any(item => item["model"]?.Value<string>() == alias)) continue;
-            var efforts = ReasoningEfforts(provider, model);
-            var defaultEffort = provider.DefaultReasoningEfforts?.TryGetValue(model, out var configuredDefault) == true
-                && efforts.Contains(configuredDefault, StringComparer.Ordinal) ? configuredDefault
-                : efforts.Contains("medium", StringComparer.Ordinal) ? "medium" : efforts[0];
-            models.Add(new JObject
+            foreach (var provider in settings.Providers.Where(provider => provider is not null))
+            foreach (var metadata in GetEligibleModels(provider))
             {
-                ["id"] = alias, ["model"] = alias,
-                ["displayName"] = provider.Name + " · " + model,
-                ["description"] = provider.Name + " / Responses API",
-                ["hidden"] = false, ["isDefault"] = false,
-                ["supportedReasoningEfforts"] = new JArray(efforts.Select(effort => new JObject
+                var model = metadata.Id;
+                var alias = Alias(provider, model);
+                if (models.Any(item => item["model"]?.Value<string>() == alias)) continue;
+                var isLegacy = provider.Catalog is null;
+                var efforts = isLegacy
+                    ? LegacyReasoningEfforts(provider, model)
+                    : metadata.SupportsReasoning == false
+                        ? Array.Empty<string>()
+                        : (IReadOnlyList<string>)(metadata.ReasoningEfforts?.ToArray() ?? Array.Empty<string>());
+                string? defaultEffort;
+                if (isLegacy)
                 {
-                    ["reasoningEffort"] = effort,
-                    ["description"] = "Request " + effort + " reasoning effort from this provider."
-                })),
-                ["defaultReasoningEffort"] = defaultEffort,
-                ["inputModalities"] = new JArray("text"),
-                ["supportsPersonality"] = false,
-                ["additionalSpeedTiers"] = new JArray(), ["serviceTiers"] = new JArray(),
-                ["upgrade"] = null, ["upgradeInfo"] = null, ["availabilityNux"] = null,
-                ["modelSpecialty"] = null, ["multiAgentVersion"] = null,
-                ["defaultServiceTier"] = null, ["availableAccessPrograms"] = null
-            });
+                    defaultEffort = provider.DefaultReasoningEfforts?.TryGetValue(model, out var configuredDefault) == true
+                        && efforts.Contains(configuredDefault, StringComparer.Ordinal) ? configuredDefault
+                        : efforts.Contains("medium", StringComparer.Ordinal) ? "medium" : efforts[0];
+                }
+                else
+                {
+                    defaultEffort = metadata.DefaultReasoningEffort is not null
+                        && efforts.Contains(metadata.DefaultReasoningEffort, StringComparer.Ordinal)
+                            ? metadata.DefaultReasoningEffort : null;
+                }
+                models.Add(new JObject
+                {
+                    ["id"] = alias, ["model"] = alias,
+                    ["displayName"] = provider.Name + " · " + (metadata.DisplayName ?? model),
+                    ["description"] = provider.Name + " / Responses API",
+                    ["hidden"] = false, ["isDefault"] = false,
+                    ["supportedReasoningEfforts"] = new JArray(efforts.Select(effort => new JObject
+                    {
+                        ["reasoningEffort"] = effort,
+                        ["description"] = "Request " + effort + " reasoning effort from this provider."
+                    })),
+                    ["defaultReasoningEffort"] = defaultEffort is null ? JValue.CreateNull() : defaultEffort,
+                    ["inputModalities"] = metadata.SupportsImages == true
+                        ? new JArray("text", "image") : new JArray("text"),
+                    ["supportsPersonality"] = false,
+                    ["additionalSpeedTiers"] = new JArray(), ["serviceTiers"] = new JArray(),
+                    ["upgrade"] = null, ["upgradeInfo"] = null, ["availabilityNux"] = null,
+                    ["modelSpecialty"] = null, ["multiAgentVersion"] = null,
+                    ["defaultServiceTier"] = null, ["availableAccessPrograms"] = null
+                });
+            }
         }
         var selected = settings.DefaultModel;
-        if (string.IsNullOrWhiteSpace(selected) && !hasOfficialAccount)
-            selected = Alias(settings.Providers[0], settings.Providers[0].Models[0]);
+        if (string.IsNullOrWhiteSpace(selected) && !hasChatGptLogin)
+            selected = FirstAvailableAlias(settings);
         if (models.Any(m => m["model"]?.Value<string>() == selected))
             foreach (var model in models.OfType<JObject>()) model["isDefault"] = model["model"]?.Value<string>() == selected;
         response["data"] = models;

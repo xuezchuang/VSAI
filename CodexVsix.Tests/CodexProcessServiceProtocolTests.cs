@@ -4,6 +4,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Reflection;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using CodexVsix.Models;
 using CodexVsix.Services;
@@ -281,6 +282,77 @@ public sealed class CodexProcessServiceProtocolTests
         Assert.Equal(replaceGeneration ? 8L : 7L, GetField(fixture.Service, "_serverGeneration"));
         Assert.False(fixture.Process.HasExited);
         Assert.False(GetTurnCompletion(nextTurn).Task.IsCompleted);
+    }
+
+    [Fact]
+    public async Task UpdatedCatalogWaitsForActiveTurnWithoutReplacingItsProcess()
+    {
+        using var directory = new TemporaryDirectory();
+        using var fixture = new CancellationFixture();
+        var settings = ConfigureCatalogServer(fixture, directory.Path);
+        var previousKey = GetField(fixture.Service, "_serverModelCatalogKey");
+        File.WriteAllText(Path.Combine(directory.Path, "vsai", "models_cache.json"),
+            "{\"models\":[{\"slug\":\"official-model\"},{\"slug\":\"gpt-6-luna\"}]}");
+        Assert.NotEqual(previousKey, CodexProviderModelCatalogRuntime.ReadSnapshot(settings)!.Key);
+
+        await (Task)Invoke(fixture.Service, "EnsureServerReadyAsync", settings, directory.Path, CancellationToken.None)!;
+
+        Assert.False(fixture.Process.HasExited);
+        Assert.Equal(previousKey, GetField(fixture.Service, "_serverModelCatalogKey"));
+        Assert.False(fixture.Completion.Task.IsCompleted);
+        var cancellation = fixture.Service.CancelActiveTurnAsync();
+        var request = await fixture.WaitForRequestAsync();
+        Assert.Equal("turn/interrupt", request["method"]?.Value<string>());
+        fixture.ResolveInterrupt(request["id"]!, reject: false);
+        await cancellation;
+        Assert.False(fixture.Process.HasExited);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task IncompleteCatalogRefreshKeepsAnExistingIdleServer(bool missingFile)
+    {
+        using var directory = new TemporaryDirectory();
+        using var fixture = new CancellationFixture();
+        var settings = ConfigureCatalogServer(fixture, directory.Path);
+        SetField(fixture.Service, "_activeTurn", null!);
+        var previousKey = GetField(fixture.Service, "_serverModelCatalogKey");
+        var cache = Path.Combine(directory.Path, "vsai", "models_cache.json");
+        if (missingFile) File.Delete(cache);
+        else File.WriteAllText(cache, "{\"models\":[");
+
+        await (Task)Invoke(fixture.Service, "EnsureServerReadyAsync", settings, directory.Path, CancellationToken.None)!;
+
+        Assert.False(fixture.Process.HasExited);
+        Assert.Equal(previousKey, GetField(fixture.Service, "_serverModelCatalogKey"));
+        Assert.Equal("thread-1", fixture.Service.CurrentThreadId);
+        Assert.Equal(0, fixture.Writer.WriteCount);
+    }
+
+    private static CodexExtensionSettings ConfigureCatalogServer(CancellationFixture fixture, string directory)
+    {
+        var provider = new CodexProviderConfiguration
+        {
+            Name = "Fixture", BaseUrl = "https://fixture.example.test/v1",
+            ApiKey = "synthetic-test-key", Models = { "custom-model" }
+        };
+        provider.ContextWindows["custom-model"] = 1_048_576;
+        var settings = new CodexExtensionSettings
+        {
+            CodexExecutablePath = Path.Combine(directory, "not-a-real-codex.exe"),
+            EnvironmentVariables = "CODEX_HOME=" + directory,
+            WorkingDirectory = directory,
+            Providers = { provider }
+        };
+        Directory.CreateDirectory(Path.Combine(directory, "vsai"));
+        File.WriteAllText(Path.Combine(directory, "vsai", "models_cache.json"), "{\"models\":[{\"slug\":\"official-model\"}]}");
+        var snapshot = CodexProviderModelCatalogRuntime.ReadSnapshot(settings)!;
+        var configKey = typeof(CodexProcessService).GetMethod("BuildServerConfigKey", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, new object[] { settings });
+        SetField(fixture.Service, "_serverConfigKey", configKey!);
+        SetField(fixture.Service, "_serverModelCatalogKey", snapshot.Key);
+        return settings;
     }
 
     private static object CreateTurn(string turnId)

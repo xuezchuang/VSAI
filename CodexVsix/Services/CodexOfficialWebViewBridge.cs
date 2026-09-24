@@ -42,6 +42,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
     private readonly CodexWebViewPayloadLimiter _payloadLimiter = new();
     private readonly CodexWebViewHistoryWindowController _historyWindowController;
     private readonly CodexWebViewAutoCompactionCoordinator _autoCompactionCoordinator;
+    private readonly CodexOfficialAccountController _officialAccount;
     private readonly Dictionary<string, JToken?> _sharedObjects = new(StringComparer.Ordinal)
     {
         ["host_config"] = new JObject
@@ -57,6 +58,10 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
     private readonly bool _isSettingsSurface;
     private readonly Action<string>? _routeChanged;
     private bool _disposed;
+    private CancellationTokenSource? _providerDiscoveryCancellation;
+    private string? _providerDiscoveryToken;
+    private string? _providerDiscoveryScope;
+    private CodexProviderDiscoveryResult? _providerDiscoveryResult;
     private string _workspaceDirectory;
     private readonly CodexWorkspaceRequestRebaser _workspaceRequests = new();
 
@@ -70,6 +75,10 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
     {
         _viewModel = viewModel;
         _processService = viewModel.ProcessService;
+        _officialAccount = new CodexOfficialAccountController(
+            (method, parameters, token) => _processService.InvokeAppServerRequestAsync(_viewModel.Settings, method, parameters, token),
+            () => _processService.PendingOfficialLoginId,
+            () => _viewModel.IsBusy || _processService.HasActiveProviderWork, OpenInBrowser);
         _postMessage = postMessage;
         _openSettings = openSettings;
         _broadcastQueryInvalidation = broadcastQueryInvalidation;
@@ -113,11 +122,24 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
                 return;
 
             case "view-focused":
+                // Focusing the view must not refresh model catalogs or saved selection.
+                return;
             case "tray-menu-threads-changed":
                 return;
 
             case "query-cache-invalidate":
                 HandleQueryCacheInvalidation(message);
+                return;
+
+            case "providers-discover":
+                await HandleProviderDiscoveryAsync(message, cancellationToken).ConfigureAwait(false);
+                return;
+
+            case "official-account-request":
+            case "official-account-login":
+            case "official-account-cancel":
+                Post(await _officialAccount.HandleAsync(type, message["requestId"]?.Value<string>(), cancellationToken).ConfigureAwait(false));
+                PostProvidersState();
                 return;
 
             case "providers-request":
@@ -362,70 +384,38 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
             {
                 await _processService.UpdateProvidersAsync(_viewModel.Settings, () =>
                 {
-                    var settings = _viewModel.Settings;
-                    var original = settings.Providers;
-                    var oldModel = settings.DefaultModel;
-                    var profiles = original.ToList();
-                    if (type == "providers-delete")
+                    _settingsStore.UpdateProviderCatalogs(_viewModel.Settings, settings =>
                     {
-                        var id = message["id"]?.Value<string>();
-                        if (profiles.RemoveAll(p => p.Id == id) == 0)
-                            throw new ArgumentException("找不到要移除的服务，请刷新后重试。");
-                    }
-                    else
-                    {
-                        var input = message["provider"] as JObject ?? throw new ArgumentException("请填写服务配置。");
-                        var id = input["id"]?.Value<string>();
-                        var existing = profiles.FirstOrDefault(p => p.Id == id);
-                        if (!string.IsNullOrEmpty(id) && existing is null)
-                            throw new ArgumentException("找不到要修改的服务，请刷新后重试。");
-                        if (existing is null && profiles.Count >= 16) throw new ArgumentException("最多可配置 16 个服务。");
-                        var provider = new CodexProviderConfiguration
+                        var profiles = settings.Providers.ToList();
+                        if (type == "providers-delete")
                         {
-                            Id = existing?.Id ?? Guid.NewGuid().ToString("N"),
-                            Name = input["name"]?.Value<string>()?.Trim() ?? string.Empty,
-                            BaseUrl = input["baseUrl"]?.Value<string>()?.Trim() ?? string.Empty,
-                            ApiKey = input["apiKey"]?.Value<string>() ?? string.Empty,
-                            Models = (input["models"] as JArray ?? new JArray()).Values<string>()
-                                .Where(m => !string.IsNullOrWhiteSpace(m)).Select(m => m!.Trim()).Distinct(StringComparer.Ordinal).ToList()
-                        };
-                        if (string.IsNullOrEmpty(provider.ApiKey)) provider.ApiKey = existing?.ApiKey ?? string.Empty;
-                        // Editing the name/key or model list must preserve imported per-model capabilities.
-                        if (existing is not null && string.Equals(existing.BaseUrl, provider.BaseUrl, StringComparison.Ordinal))
-                        {
-                            if (existing.ReasoningEfforts is not null)
-                                provider.ReasoningEfforts = existing.ReasoningEfforts
-                                    .Where(pair => provider.Models.Contains(pair.Key) && pair.Value is not null)
-                                    .ToDictionary(pair => pair.Key, pair => pair.Value.ToList(), StringComparer.Ordinal);
-                            if (existing.DefaultReasoningEfforts is not null)
-                                provider.DefaultReasoningEfforts = existing.DefaultReasoningEfforts
-                                    .Where(pair => provider.Models.Contains(pair.Key))
-                                    .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
-                            if (existing.ContextWindows is not null)
-                                provider.ContextWindows = existing.ContextWindows
-                                    .Where(pair => provider.Models.Contains(pair.Key))
-                                    .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+                            var id = message["id"]?.Value<string>();
+                            if (profiles.RemoveAll(p => p.Id == id) == 0)
+                                throw new ArgumentException("找不到要移除的服务，请刷新后重试。");
                         }
-                        CodexProviderConfigurationService.Validate(provider);
-                        if (profiles.Any(p => p.Id != provider.Id && string.Equals(p.Name, provider.Name, StringComparison.OrdinalIgnoreCase)))
-                            throw new ArgumentException("服务名称已存在，请使用不同的名称以便区分模型。");
-                        if (existing is null) profiles.Add(provider);
-                        else profiles[profiles.IndexOf(existing)] = provider;
-                    }
-                    try
-                    {
+                        else
+                        {
+                            var input = message["provider"] as JObject ?? throw new ArgumentException("请填写服务配置。");
+                            var id = input["id"]?.Value<string>();
+                            var existing = profiles.FirstOrDefault(p => p.Id == id);
+                            if (!string.IsNullOrEmpty(id) && existing is null)
+                                throw new ArgumentException("找不到要修改的服务，请刷新后重试。");
+                            if (existing is null && profiles.Count >= 16) throw new ArgumentException("最多可配置 16 个服务。");
+                            var provider = CodexProviderEditorProtocol.Read(input, existing, acceptedDiscovery: candidate =>
+                                input["discoveryToken"]?.Value<string>() == _providerDiscoveryToken
+                                && _providerDiscoveryScope == CodexProviderCatalogSynchronizer.ConnectionScope(candidate)
+                                    ? _providerDiscoveryResult : null);
+                            if (profiles.Any(p => p.Id != provider.Id && string.Equals(p.Name, provider.Name, StringComparison.OrdinalIgnoreCase)))
+                                throw new ArgumentException("服务名称已存在，请使用不同的名称以便区分模型。");
+                            if (existing is null) profiles.Add(provider);
+                            else profiles[profiles.IndexOf(existing)] = provider;
+                        }
                         settings.Providers = profiles;
                         if (settings.DefaultModel.StartsWith(CodexProviderModelCatalog.AliasPrefix, StringComparison.Ordinal)
                             && !profiles.Any(p => p.Models.Any(m => CodexProviderModelCatalog.Alias(p, m) == settings.DefaultModel)))
                             settings.DefaultModel = string.Empty;
-                        _settingsStore.Save(settings, updateProviders: true);
-                    }
-                    catch
-                    {
-                        settings.Providers = original;
-                        settings.DefaultModel = oldModel;
-                        throw;
-                    }
+                        return true;
+                    });
                 }, cancellationToken).ConfigureAwait(false);
             }
             PostProvidersState(requestId, saved: type != "providers-request");
@@ -447,12 +437,54 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
             ["type"] = "providers-state", ["requestId"] = requestId,
             ["saved"] = saved, ["error"] = error,
             ["isBusy"] = _viewModel.IsBusy || _processService.HasActiveProviderWork,
-            ["providers"] = new JArray(_viewModel.Settings.Providers.Select(p => new JObject
+            ["providers"] = new JArray(_viewModel.Settings.Providers.Select(provider =>
             {
-                ["id"] = p.Id, ["name"] = p.Name, ["baseUrl"] = p.BaseUrl,
-                ["models"] = new JArray(p.Models), ["hasApiKey"] = !string.IsNullOrEmpty(p.ApiKey)
+                var profile = CodexProviderEditorProtocol.ToPublicProfile(provider);
+                profile["runtimeWarnings"] = new JArray(_processService.ProviderCatalogRuntimeWarnings);
+                return profile;
             }))
         });
+    }
+
+    private async Task HandleProviderDiscoveryAsync(JObject message, CancellationToken token)
+    {
+        var previous = _providerDiscoveryCancellation;
+        try { previous?.Cancel(); } catch (ObjectDisposedException) { }
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+        _providerDiscoveryCancellation = cancellation;
+        var requestId = message["requestId"]?.Value<string>();
+        try
+        {
+            var input = message["provider"] as JObject ?? throw new ArgumentException("请填写服务配置。");
+            var id = input["id"]?.Value<string>();
+            var existing = _viewModel.Settings.Providers.FirstOrDefault(p => p.Id == id);
+            if (!string.IsNullOrEmpty(id) && existing is null) throw new ArgumentException("服务已被移除，请刷新后重试。");
+            var provider = CodexProviderEditorProtocol.Read(input, existing, discovery: true);
+            var result = await CodexProcessService.ProviderDiscovery.FetchAsync(provider, cancellation.Token).ConfigureAwait(false);
+            if (!_disposed && !cancellation.IsCancellationRequested)
+            {
+                _providerDiscoveryToken = requestId;
+                _providerDiscoveryScope = CodexProviderCatalogSynchronizer.ConnectionScope(provider);
+                _providerDiscoveryResult = result;
+                Post(CodexProviderEditorProtocol.DiscoveryResponse(requestId, result));
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            if (!_disposed && !cancellation.IsCancellationRequested)
+                Post(new JObject
+                {
+                    ["type"] = "providers-discovery", ["requestId"] = requestId, ["status"] = "error",
+                    ["error"] = ex is ArgumentException ? ex.Message : "模型目录获取失败；已保留原有配置，可手动补充或稍后刷新。",
+                    ["attemptedUtc"] = DateTime.UtcNow
+                });
+        }
+        finally
+        {
+            if (ReferenceEquals(_providerDiscoveryCancellation, cancellation)) _providerDiscoveryCancellation = null;
+            if (message["provider"] is JObject input) input.Remove("apiKey");
+        }
     }
 
     private void OnProvidersChanged() => _ = RefreshProviderQueriesAsync();
@@ -472,6 +504,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
             });
         }
         catch { /* Saved configuration remains available; the normal connection UI reports startup errors. */ }
+        PostProvidersState();
         foreach (var key in new[] { new JArray("models", "list"), new JArray("user-saved-config"), new JArray("config") })
         {
             Post(CreateQueryInvalidationNotification(key));
@@ -815,7 +848,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
                 return await OpenFileAsync(values).ConfigureAwait(false);
 
             case "mcp-codex-config":
-                return new JObject { ["path"] = _solutionContextService.GetCodexConfigPath() };
+                return new JObject { ["path"] = _solutionContextService.GetCodexConfigPath(_viewModel.Settings.EnvironmentVariables) };
 
             case "codex-home":
             {
@@ -2036,7 +2069,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
     {
         await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
         _solutionContextService.OpenFileInVisualStudio(
-            string.IsNullOrWhiteSpace(path) ? _solutionContextService.GetCodexConfigPath() : ResolveFilePath(path!));
+            string.IsNullOrWhiteSpace(path) ? _solutionContextService.GetCodexConfigPath(_viewModel.Settings.EnvironmentVariables) : ResolveFilePath(path!));
     }
 
     private async Task OpenTextArtifactAsync(string? content, string extension)
@@ -2062,6 +2095,8 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         }
 
         _autoCompactionCoordinator.ObserveNotification(method, parameters);
+        if (method == "account/updated" || method == "account/login/completed")
+            _ = RefreshOfficialAccountAsync(method == "account/login/completed" && parameters?["success"]?.Value<bool>() == false);
         if (method == "turn/started" || method == "turn/completed" || method == "thread/closed") PostProvidersState();
         parameters = _appServerRequestRelay.TransformNotificationParameters(method, parameters);
         if (!_payloadLimiter.TryLimitNotification(method, parameters, out var limitedParameters))
@@ -2076,6 +2111,20 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
             ["method"] = method,
             ["params"] = limitedParameters
         });
+    }
+
+    private async Task RefreshOfficialAccountAsync(bool loginFailed)
+    {
+        var state = loginFailed
+            ? CodexOfficialAccountController.Error(null, "官方登录未完成。请重新登录；第三方服务仍可使用。")
+            : await _officialAccount.HandleAsync("official-account-request", null, CancellationToken.None).ConfigureAwait(false);
+        Post(state);
+        PostProvidersState();
+        foreach (var key in new[] { new JArray("models", "list"), new JArray("user-saved-config"), new JArray("config") })
+        {
+            Post(CreateQueryInvalidationNotification(key));
+            _broadcastQueryInvalidation?.Invoke(key);
+        }
     }
 
     private void PostHistoryWindowStatus(CodexWebViewHistoryWindowStatus status)
@@ -2147,7 +2196,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
 
     internal static JObject BuildRecentConversationRefreshParams(JObject values)
     {
-        return new JObject
+        var parameters = new JObject
         {
             ["archived"] = false,
             ["cursor"] = values["cursor"]?.Type == JTokenType.String
@@ -2156,6 +2205,9 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
             ["modelProviders"] = new JArray(),
             ["sortKey"] = values["sortKey"]?.Value<string>() ?? "updated_at"
         };
+        var searchTerm = LimitHistoryText(values["searchTerm"], 240);
+        if (searchTerm is not null) parameters["searchTerm"] = searchTerm;
+        return parameters;
     }
 
     internal static JObject PrepareWorkspaceHistoryParams(JToken? parameters, string workingDirectory)
@@ -2597,6 +2649,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         }
 
         _disposed = true;
+        try { _providerDiscoveryCancellation?.Cancel(); } catch (ObjectDisposedException) { }
         DisableInteractiveServerRequests();
         _historyWindowController.Dispose();
         _autoCompactionCoordinator.Dispose();

@@ -26,7 +26,7 @@ public sealed class CodexProviderConfigurationServiceTests
         var command = CodexAppServerCommandLine.Build(settings);
         var arguments = CodexAppServerCommandLine.SplitArguments(command).ToArray();
 
-        Assert.Equal("model_provider=\"openai\"", arguments.Last());
+        Assert.Equal("model_provider=\"openai\"", arguments.Last(arg => arg.StartsWith("model_provider=", StringComparison.Ordinal)));
         Assert.Equal(prefix + "\"" + CodexProviderConfigurationService.GetEnvironmentKey(provider) + "\"",
             arguments.Last(arg => arg.StartsWith(prefix, StringComparison.Ordinal)));
         Assert.DoesNotContain(provider.ApiKey, command, StringComparison.Ordinal);

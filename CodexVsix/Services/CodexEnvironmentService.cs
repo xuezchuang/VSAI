@@ -28,6 +28,7 @@ public sealed class CodexEnvironmentService
 
         try
         {
+            await Task.Run(() => CodexSessionStorage.Prepare(settings.EnvironmentVariables), cancellationToken).ConfigureAwait(false);
             var resolvedExecutablePath = CodexExecutableResolver.ResolveExecutableLocation(configuredExecutablePath, settings.EnvironmentVariables);
             if (string.IsNullOrWhiteSpace(resolvedExecutablePath))
             {
@@ -95,25 +96,32 @@ public sealed class CodexEnvironmentService
         }
     }
 
-    public void LaunchLoginTerminal(string executablePath)
+    public async Task LaunchLoginTerminalAsync(string executablePath, string? environmentVariables = null)
     {
         if (string.IsNullOrWhiteSpace(executablePath))
         {
             return;
         }
 
+        await Task.Run(() => CodexSessionStorage.Prepare(environmentVariables));
+        var start = CreateLoginStartInfo(executablePath, environmentVariables);
+        Process.Start(start)?.Dispose();
+    }
+
+    internal static ProcessStartInfo CreateLoginStartInfo(string executablePath, string? environmentVariables)
+    {
+        const string loginArguments = " -c cli_auth_credentials_store='file' login";
+        ProcessStartInfo start;
         if (IsPowerShellScript(executablePath))
         {
-            Process.Start(new ProcessStartInfo
+            start = new ProcessStartInfo
             {
                 FileName = ResolvePowerShellHost(),
-                Arguments = "-NoExit -ExecutionPolicy Bypass -File " + CodexAppServerCommandLine.QuoteArgument(executablePath) + " login",
-                UseShellExecute = true
-            });
-            return;
+                Arguments = "-NoExit -ExecutionPolicy Bypass -File " + CodexAppServerCommandLine.QuoteArgument(executablePath) + loginArguments,
+                UseShellExecute = false
+            };
         }
-
-        if (Environment.OSVersion.Platform == PlatformID.Win32NT)
+        else if (Environment.OSVersion.Platform == PlatformID.Win32NT)
         {
             var commandShell = Environment.GetEnvironmentVariable("ComSpec");
             if (string.IsNullOrWhiteSpace(commandShell))
@@ -121,28 +129,27 @@ public sealed class CodexEnvironmentService
                 commandShell = "cmd.exe";
             }
 
-            Process.Start(new ProcessStartInfo
+            start = new ProcessStartInfo
             {
                 FileName = commandShell,
-                Arguments = "/k \"" + QuoteForCommandShell(executablePath) + " login\"",
-                UseShellExecute = true
-            });
-            return;
+                Arguments = "/k \"" + QuoteForCommandShell(executablePath) + loginArguments + "\"",
+                UseShellExecute = false
+            };
         }
-
-        Process.Start(new ProcessStartInfo
+        else start = new ProcessStartInfo
         {
             FileName = executablePath,
-            Arguments = "login",
-            UseShellExecute = true
-        });
+            Arguments = loginArguments.TrimStart(),
+            UseShellExecute = false
+        };
+        ApplyEnvironmentVariables(start, environmentVariables);
+        CodexSessionStorage.ApplyEnvironment(start, environmentVariables);
+        return start;
     }
 
-    public void DeleteAuthFile(string? authFilePath = null)
+    public void DeleteAuthFile(string? environmentVariables = null)
     {
-        var path = string.IsNullOrWhiteSpace(authFilePath)
-            ? GetAuthFilePath()
-            : authFilePath!;
+        var path = GetAuthFilePath(environmentVariables);
 
         if (!File.Exists(path))
         {
@@ -261,6 +268,7 @@ public sealed class CodexEnvironmentService
         };
 
         ApplyEnvironmentVariables(process.StartInfo, settings.EnvironmentVariables);
+        CodexSessionStorage.ApplyEnvironment(process.StartInfo, settings.EnvironmentVariables);
         foreach (var provider in settings.Providers)
         {
             CodexProviderConfigurationService.ApplyEnvironment(process.StartInfo, provider);
@@ -441,9 +449,11 @@ public sealed class CodexEnvironmentService
         };
     }
 
-    private static ProcessStartInfo CreateServerProbeStartInfo(string executablePath, CodexExtensionSettings settings)
+    internal static ProcessStartInfo CreateServerProbeStartInfo(string executablePath, CodexExtensionSettings settings, bool migrationSource = false)
     {
-        var arguments = BuildServerProbeArguments(settings);
+        var arguments = migrationSource
+            ? CodexAppServerCommandLine.Build(settings, migrationSource: true)
+            : BuildServerProbeArguments(settings);
         var workingDirectory = ResolveWorkingDirectory(settings.WorkingDirectory);
         if (IsPowerShellScript(executablePath))
         {

@@ -19,6 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Reference Include="System.Net.Http" />
     <ProjectReference Include="..\CodexVsix\CodexVsix.csproj" AdditionalProperties="BuildVsixPackage=false" />
   </ItemGroup>
 </Project>

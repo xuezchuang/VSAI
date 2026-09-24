@@ -8,6 +8,13 @@ internal static class CodexEnvironmentPathHelper
 {
     public static string GetCodexHomeDirectory(string? environmentVariables = null)
     {
+        // CODEX_HOME identifies the existing desktop/CLI home. VSAI owns a child
+        // home so choosing a model never changes which conversation store is used.
+        return Path.Combine(GetSharedCodexHomeDirectory(environmentVariables), "vsai");
+    }
+
+    public static string GetSharedCodexHomeDirectory(string? environmentVariables = null)
+    {
         var configuredHome = GetEffectiveEnvironmentVariable("CODEX_HOME", environmentVariables);
         if (!string.IsNullOrWhiteSpace(configuredHome))
         {

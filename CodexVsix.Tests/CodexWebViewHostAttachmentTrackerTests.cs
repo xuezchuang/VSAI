@@ -45,6 +45,25 @@ public sealed class CodexWebViewHostAttachmentTrackerTests
     }
 
     [Fact]
+    public void CompositionPageSurvivesRepeatedDockAutoHideAndFloatTransitions()
+    {
+        var tracker = new CodexWebViewHostAttachmentTracker();
+        var hostingMode = CodexOfficialWebViewHostingMode.Composition;
+        tracker.Observe(new IntPtr(10), IntPtr.Zero, hostingMode);
+
+        // VS temporarily detaches the visual before attaching to the auto-hide or floating host.
+        foreach (var root in new[] { 11, 10, 12, 10 })
+        {
+            var detached = tracker.Observe(IntPtr.Zero, IntPtr.Zero, hostingMode);
+            var attached = tracker.Observe(new IntPtr(root), IntPtr.Zero, hostingMode);
+
+            Assert.Equal(CodexWebViewHostAttachmentAction.MissingHost, detached.Action);
+            Assert.Equal(CodexWebViewHostAttachmentAction.Reuse, attached.Action);
+            Assert.Equal(new IntPtr(root), attached.CurrentRootWindow);
+        }
+    }
+
+    [Fact]
     public void MissingPresentationSourceDefersInitializationDecision()
     {
         var tracker = new CodexWebViewHostAttachmentTracker();

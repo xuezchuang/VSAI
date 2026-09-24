@@ -83,7 +83,8 @@ public sealed class CodexToolWindowXamlTests
         Assert.DoesNotContain("WithWorkspaceSelector", toolWindowSource);
         Assert.Contains("CodexRendererCoordinator.Shared", toolWindowSource);
         Assert.Contains("if (renderer == CodexRendererKind.ClassicWpf)", toolWindowSource);
-        Assert.Contains("_webViewHost = new CodexOfficialWebViewHost(_viewModel);", toolWindowSource);
+        Assert.Contains("_webViewHost = new CodexOfficialWebViewHost(", toolWindowSource);
+        Assert.Contains("hostingMode: CodexOfficialWebViewHostingMode.Composition", toolWindowSource);
         Assert.Contains("_classicControl = new CodexToolWindowControl(", toolWindowSource);
         Assert.Contains("RetryOfficialRenderer(\"manual-main\")", toolWindowSource);
         Assert.Contains("DisposeActiveRenderer();", toolWindowSource);

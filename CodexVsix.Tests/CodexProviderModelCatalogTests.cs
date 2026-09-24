@@ -81,4 +81,107 @@ public sealed class CodexProviderModelCatalogTests
         Assert.Single(model["supportedReasoningEfforts"]!);
         Assert.Equal("high", model["defaultReasoningEffort"]!.Value<string>());
     }
+
+    [Fact]
+    public void CatalogMetadataControlsLabelsEffortsImagesAndEligibilityExactly()
+    {
+        var provider = new CodexProviderConfiguration
+        {
+            Name = "Discovered",
+            Catalog = new CodexProviderCatalogConfiguration
+            {
+                DiscoveredModels =
+                {
+                    new CodexProviderModelMetadata
+                    {
+                        Id = "vision-model", DisplayName = "Vision Model", SupportsImages = true,
+                        SupportsTools = true, SupportsResponses = true, SupportsReasoning = true,
+                        ReasoningEfforts = new() { "minimal", "high" }, DefaultReasoningEffort = "high"
+                    },
+                    new CodexProviderModelMetadata { Id = "chat-only", SupportsTools = false, SupportsResponses = true },
+                    new CodexProviderModelMetadata { Id = "completions-only", SupportsTools = true, SupportsResponses = false }
+                }
+            }
+        };
+
+        var result = CodexProviderModelCatalog.Merge(
+            new CodexExtensionSettings { Providers = { provider } }, new JObject(), hasChatGptLogin: true)!;
+        var model = Assert.Single((JArray)result["data"]!);
+
+        Assert.Equal("Discovered · Vision Model", model["displayName"]!.Value<string>());
+        Assert.Equal(new[] { "minimal", "high" }, model["supportedReasoningEfforts"]!
+            .Select(item => item["reasoningEffort"]!.Value<string>()));
+        Assert.Equal("high", model["defaultReasoningEffort"]!.Value<string>());
+        Assert.Equal(new[] { "text", "image" }, model["inputModalities"]!.Values<string>());
+    }
+
+    [Fact]
+    public void UnknownCatalogReasoningDoesNotFabricateEffortsAndEmptyProviderIsSafe()
+    {
+        var unknown = new CodexProviderConfiguration
+        {
+            Name = "Unknown",
+            Catalog = new CodexProviderCatalogConfiguration
+            {
+                ManualModels = { "unknown-model" }
+            }
+        };
+        var empty = new CodexProviderConfiguration
+        {
+            Name = "Empty",
+            Catalog = new CodexProviderCatalogConfiguration()
+        };
+
+        var result = CodexProviderModelCatalog.Merge(
+            new CodexExtensionSettings { Providers = { empty, unknown } }, null, hasChatGptLogin: false)!;
+        var model = Assert.Single((JArray)result["data"]!);
+
+        Assert.Empty(model["supportedReasoningEfforts"]!);
+        Assert.Equal(JTokenType.Null, model["defaultReasoningEffort"]!.Type);
+        Assert.True(model["isDefault"]!.Value<bool>());
+    }
+
+    [Fact]
+    public void GeneratedBareRuntimeRowsAreHiddenWithoutRemovingNativeRows()
+    {
+        var provider = new CodexProviderConfiguration
+        {
+            Name = "Automatic",
+            Catalog = new CodexProviderCatalogConfiguration { ManualModels = { "official-model" } }
+        };
+        var native = new JObject { ["model"] = "official-model", ["description"] = "Official model" };
+        var generated = new JObject
+        {
+            ["model"] = "official-model", ["description"] = CodexProviderModelCatalogFile.RuntimeDescription
+        };
+        var raw = new JObject { ["data"] = new JArray(native, generated) };
+
+        var result = CodexProviderModelCatalog.Merge(
+            new CodexExtensionSettings { Providers = { provider } }, raw, hasChatGptLogin: true)!;
+
+        Assert.Equal(new[] { "official-model", CodexProviderModelCatalog.Alias(provider, "official-model") },
+            result["data"]!.Select(item => item["model"]!.Value<string>()));
+        Assert.Equal("official-model", raw["data"]![1]!["model"]!.Value<string>());
+    }
+
+    [Fact]
+    public void FirstAvailableAliasSkipsIneligibleAndEmptyProviders()
+    {
+        var empty = new CodexProviderConfiguration { Catalog = new CodexProviderCatalogConfiguration() };
+        var provider = new CodexProviderConfiguration
+        {
+            Catalog = new CodexProviderCatalogConfiguration
+            {
+                DiscoveredModels =
+                {
+                    new CodexProviderModelMetadata { Id = "chat", SupportsTools = false },
+                    new CodexProviderModelMetadata { Id = "coding", SupportsTools = true, SupportsResponses = true }
+                }
+            }
+        };
+
+        Assert.Equal(CodexProviderModelCatalog.Alias(provider, "coding"),
+            CodexProviderModelCatalog.FirstAvailableAlias(
+                new CodexExtensionSettings { Providers = { empty, provider } }));
+    }
 }

@@ -965,8 +965,8 @@ internal sealed class CodexOfficialWebViewHost : Grid, IDisposable
     private static string ResolveUserDataDirectory(CodexOfficialWebViewProfileKind profileKind)
     {
         var directoryName = profileKind == CodexOfficialWebViewProfileKind.Recovery
-            ? "WebView2-Recovery"
-            : "WebView2";
+            ? "WebView2-Recovery-private-v1"
+            : "WebView2-private-v1";
         return Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "VSAI",

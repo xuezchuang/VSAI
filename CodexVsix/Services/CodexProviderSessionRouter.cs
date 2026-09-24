@@ -19,15 +19,20 @@ internal sealed class CodexProviderSessionRouter
     private readonly Dictionary<string, JObject> _runtimeSettings = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _loadedProviders = new(StringComparer.Ordinal);
     private readonly HashSet<string> _activeThreads = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _completedLogins = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> _completed = new(StringComparer.Ordinal);
     private readonly Action<CodexExtensionSettings> _save;
     private int _starting;
     private long _completionVersion;
-    private bool _hasOfficialAccount = true;
+    private bool _hasChatGptLogin;
     private bool _managedRouting;
+    private string? _pendingLoginId;
+    private int _loginStarting;
+    private long _unidentifiedLoginCompletion;
 
     internal CodexProviderSessionRouter(Action<CodexExtensionSettings> save) => _save = save;
-    internal bool IsBusy { get { lock (_sync) return _starting != 0 || _activeThreads.Count != 0; } }
+    internal bool IsBusy { get { lock (_sync) return _starting != 0 || _activeThreads.Count != 0 || _loginStarting != 0 || _pendingLoginId is not null; } }
+    internal string? PendingLoginId { get { lock (_sync) return _pendingLoginId; } }
 
     internal async Task CaptureLoadedThreadSettingsAsync(Func<string, JToken?, CancellationToken, Task<JToken?>> send, CancellationToken token)
     {
@@ -49,11 +54,26 @@ internal sealed class CodexProviderSessionRouter
             _loadedProviders.Clear();
             _activeThreads.Clear();
             _completed.Clear();
+            _completedLogins.Clear();
+            _pendingLoginId = null;
+            _hasChatGptLogin = false;
         }
     }
 
     internal void ObserveNotification(string method, JToken? parameters)
     {
+        lock (_sync)
+        {
+            if (method == "account/updated")
+                _hasChatGptLogin = parameters?["authMode"]?.Value<string>() == "chatgpt";
+            if (method == "account/login/completed")
+            {
+                var loginId = parameters?["loginId"]?.Value<string>();
+                if (loginId is null) _unidentifiedLoginCompletion++;
+                else _completedLogins.Add(loginId);
+                if (loginId is null || _pendingLoginId == loginId) _pendingLoginId = null;
+            }
+        }
         var id = parameters?["threadId"]?.Value<string>() ?? parameters?["thread"]?["id"]?.Value<string>();
         if (string.IsNullOrEmpty(id)) return;
         if (method == "thread/settings/updated" && parameters?["threadSettings"] is JObject threadSettings)
@@ -104,9 +124,11 @@ internal sealed class CodexProviderSessionRouter
         var routesModel = method == "thread/start" || method == "thread/resume" || method == "thread/fork"
             || method == "turn/start" || method == "thread/settings/update";
         var selection = routesModel ? ResolveSelection(settings, values, method) : null;
+        if (selection is null && method == "thread/fork")
+            selection = ResolveForkSourceSelection(settings, values);
         if (selection is not null)
         {
-            if (values["model"]?.Type == JTokenType.String || method == "thread/start" || method == "thread/resume")
+            if (values["model"]?.Type == JTokenType.String || method == "thread/start" || method == "thread/resume" || method == "thread/fork")
                 values["model"] = selection.Model;
             if (values["collaborationMode"]?["settings"] is JObject collaboration)
                 collaboration["model"] = selection.Model;
@@ -137,7 +159,7 @@ internal sealed class CodexProviderSessionRouter
                     var resume = ResumeParameters(threadId!, selection);
                     var runtime = GetRuntimeSettings(threadId!);
                     var resumed = await send("thread/resume", Enrich(settings, "thread/resume", resume), cancellationToken).ConfigureAwait(false);
-                    resumed = await RestoreRuntimeSettingsAsync(threadId!, runtime, resumed, send, cancellationToken).ConfigureAwait(false);
+                    resumed = await RestoreRuntimeSettingsAsync(settings, threadId!, runtime, resumed, send, cancellationToken).ConfigureAwait(false);
                     RememberThread("thread/resume", resume, resumed);
                     await VerifyProviderAsync(settings, threadId!, selection, resumed, send, restart, cancellationToken).ConfigureAwait(false);
                 }
@@ -147,16 +169,38 @@ internal sealed class CodexProviderSessionRouter
         // A lazy resume can identify a provider that was not yet in this process's cache.
         if (routesModel && IsCustomProviderRequest(values, selection)) values.Remove("serviceTier");
         var startsWork = method == "turn/start" || method == "review/start" || method == "thread/compact/start";
+        var startsLogin = method == "account/login/start";
         long beforeCompletion;
+        long beforeUnidentifiedLoginCompletion;
         lock (_sync)
         {
             beforeCompletion = _completionVersion;
+            beforeUnidentifiedLoginCompletion = _unidentifiedLoginCompletion;
             if (startsWork) _starting++;
+            if (startsLogin)
+            {
+                if (_loginStarting != 0 || _pendingLoginId is not null)
+                    throw new InvalidOperationException("官方登录正在进行，请完成或取消后再重试。");
+                _loginStarting++;
+            }
         }
         JToken? result;
         try
         {
             result = await send(method, routesModel ? Enrich(settings, method, values) : values, cancellationToken).ConfigureAwait(false);
+            lock (_sync)
+            {
+                if (startsLogin && result?["loginId"]?.Value<string>() is string loginId && !_completedLogins.Contains(loginId)
+                    && beforeUnidentifiedLoginCompletion == _unidentifiedLoginCompletion)
+                    _pendingLoginId = loginId;
+                if (method == "account/login/cancel" && values["loginId"]?.Value<string>() == _pendingLoginId)
+                    _pendingLoginId = null;
+                if (method == "account/logout")
+                {
+                    _pendingLoginId = null;
+                    _hasChatGptLogin = false;
+                }
+            }
             if (startsWork)
             {
                 var activeId = result?["reviewThreadId"]?.Value<string>() ?? threadId;
@@ -170,6 +214,7 @@ internal sealed class CodexProviderSessionRouter
         finally
         {
             if (startsWork) { lock (_sync) _starting--; }
+            if (startsLogin) { lock (_sync) _loginStarting--; }
         }
 
         if (restoreAfterResume is not null && threadId is not null)
@@ -178,7 +223,7 @@ internal sealed class CodexProviderSessionRouter
             foreach (var key in new[] { "cwd", "approvalPolicy", "approvalsReviewer", "serviceTier", "permissions" })
                 if (values[key] is JToken value) restoreAfterResume[key] = value.DeepClone();
             if (values["sandbox"] is not null || values["permissions"] is not null) restoreAfterResume.Remove("sandboxPolicy");
-            result = await RestoreRuntimeSettingsAsync(threadId, restoreAfterResume, result, send, cancellationToken).ConfigureAwait(false);
+            result = await RestoreRuntimeSettingsAsync(settings, threadId, restoreAfterResume, result, send, cancellationToken).ConfigureAwait(false);
         }
         RememberThread(method, values, result);
         if ((method == "thread/start" || method == "thread/resume" || method == "thread/fork") && selection is not null)
@@ -196,8 +241,8 @@ internal sealed class CodexProviderSessionRouter
         if (model is null && method == "thread/start")
         {
             model = settings.DefaultModel;
-            if (string.IsNullOrWhiteSpace(model) && !_hasOfficialAccount && settings.Providers.Count > 0)
-                model = CodexProviderModelCatalog.Alias(settings.Providers[0], settings.Providers[0].Models[0]);
+            if (string.IsNullOrWhiteSpace(model) && !_hasChatGptLogin)
+                model = CodexProviderModelCatalog.FirstAvailableAlias(settings);
         }
         // Without managed providers, leave existing profiles and ordinary model requests untouched.
         if (!_managedRouting && settings.Providers.Count == 0 && model?.StartsWith(CodexProviderModelCatalog.AliasPrefix, StringComparison.Ordinal) != true)
@@ -206,6 +251,33 @@ internal sealed class CodexProviderSessionRouter
         if (selected is null && values["modelProvider"]?.Value<string>() is string provider && provider.StartsWith("vsai_", StringComparison.Ordinal))
             throw new InvalidOperationException("请从模型列表选择该服务的模型。");
         return selected;
+    }
+
+    private CodexProviderModelCatalog.Selection? ResolveForkSourceSelection(CodexExtensionSettings settings, JObject values)
+    {
+        // The frozen client omits model fields when forking. Preserve the source
+        // thread's actual provider instead of allowing the app-server default.
+        if (values["model"] is not null || values["modelProvider"] is not null
+            || values["threadId"]?.Value<string>() is not string sourceId)
+            return null;
+
+        string? model;
+        string? provider;
+        lock (_sync)
+        {
+            model = _resumeOptions.TryGetValue(sourceId, out var options) ? options["model"]?.Value<string>() : null;
+            provider = _loadedProviders.TryGetValue(sourceId, out var loaded)
+                ? loaded
+                : options?["modelProvider"]?.Value<string>();
+        }
+        if (model is null || provider is null || string.IsNullOrWhiteSpace(model) || string.IsNullOrWhiteSpace(provider)
+            || !provider.StartsWith("vsai_", StringComparison.Ordinal)) return null;
+
+        var configured = settings.Providers.FirstOrDefault(candidate => candidate is not null
+            && CodexProviderConfigurationService.GetProviderId(candidate) == provider);
+        return configured is not null
+            ? CodexProviderModelCatalog.Resolve(settings, CodexProviderModelCatalog.Alias(configured, model))
+            : throw new InvalidOperationException("源会话使用的服务或模型已被移除，请重新选择模型。");
     }
 
     private JToken? Enrich(CodexExtensionSettings settings, string method, JObject values)
@@ -217,10 +289,44 @@ internal sealed class CodexProviderSessionRouter
                 if (_resumeOptions.TryGetValue(id, out var options)) model = options["model"]?.Value<string>();
         }
         if (string.IsNullOrWhiteSpace(model)) model = CodexProviderModelCatalog.Resolve(settings, settings.DefaultModel)?.Model;
+        ApplyModelCapabilities(settings, values, model);
         // A global UI preference is not evidence of this thread's effective effort.
         // Settings updates may also carry collaboration instructions that need refreshing.
         var identityMethod = method == "thread/settings/update" ? "turn/start" : method;
         return CodexRuntimeIdentityContext.EnrichRequest(identityMethod, values, model, null);
+    }
+
+    private void ApplyModelCapabilities(CodexExtensionSettings settings, JObject values, string? model, string? providerOverride = null)
+    {
+        var providerId = providerOverride ?? values["modelProvider"]?.Value<string>();
+        if (providerId is null && values["threadId"]?.Value<string>() is string id)
+        {
+            lock (_sync)
+                providerId = _loadedProviders.TryGetValue(id, out var loaded) ? loaded
+                    : _resumeOptions.TryGetValue(id, out var remembered) ? remembered["modelProvider"]?.Value<string>() : null;
+        }
+        var provider = settings.Providers.FirstOrDefault(p => "vsai_" + p.Id == providerId);
+        if (provider?.Catalog is null || model is null) return;
+        var metadata = CodexProviderCatalogConfigurationService.GetEffectiveModels(provider).FirstOrDefault(m => m.Id == model);
+        if (metadata is null) return;
+        if (metadata.SupportsResponses == false || metadata.SupportsTools == false)
+            throw new InvalidOperationException("该模型声明不支持 Responses API 或工具调用，无法用于 Codex 编程任务。请在模型与服务中确认能力配置。");
+        if (metadata.SupportsImages == false && values["input"] is JArray input
+            && input.Any(item => item["type"]?.Value<string>() is "image" or "localImage" or "input_image"))
+            throw new InvalidOperationException("该模型声明不支持图片输入，请移除图片或选择支持图片的模型。");
+        var efforts = metadata.SupportsReasoning == false ? null : metadata.ReasoningEfforts;
+        foreach (var key in new[] { "effort", "reasoningEffort" })
+        {
+            if (efforts is null || efforts.Count == 0) values.Remove(key);
+            else if (values[key]?.Value<string>() is string selected && !efforts.Contains(selected, StringComparer.Ordinal))
+                values[key] = metadata.DefaultReasoningEffort ?? efforts[0];
+        }
+        if (values["collaborationMode"]?["settings"] is JObject mode)
+        {
+            if (efforts is null || efforts.Count == 0) mode["reasoning_effort"] = JValue.CreateNull();
+            else if (mode["reasoning_effort"]?.Value<string>() is string selected && !efforts.Contains(selected, StringComparer.Ordinal))
+                mode["reasoning_effort"] = metadata.DefaultReasoningEffort ?? efforts[0];
+        }
     }
 
     private bool IsCustomProviderRequest(JObject values, CodexProviderModelCatalog.Selection? selection)
@@ -257,7 +363,7 @@ internal sealed class CodexProviderSessionRouter
         var resume = ResumeParameters(threadId, selection);
         var runtime = GetRuntimeSettings(threadId);
         result = await send("thread/resume", Enrich(settings, "thread/resume", resume), token).ConfigureAwait(false);
-        result = await RestoreRuntimeSettingsAsync(threadId, runtime, result, send, token).ConfigureAwait(false);
+        result = await RestoreRuntimeSettingsAsync(settings, threadId, runtime, result, send, token).ConfigureAwait(false);
         RememberThread("thread/resume", resume, result);
         if (result?["modelProvider"]?.Value<string>() != selection.Provider)
             throw new InvalidOperationException("Codex 未确认所选服务生效，已阻止发送。请检查 CLI 版本及服务配置。");
@@ -269,7 +375,7 @@ internal sealed class CodexProviderSessionRouter
         lock (_sync) return _runtimeSettings.TryGetValue(id, out var value) ? (JObject)value.DeepClone() : null;
     }
 
-    private static async Task<JToken?> RestoreRuntimeSettingsAsync(string id, JObject? runtime, JToken? resumed,
+    private async Task<JToken?> RestoreRuntimeSettingsAsync(CodexExtensionSettings settings, string id, JObject? runtime, JToken? resumed,
         Func<string, JToken?, CancellationToken, Task<JToken?>> send, CancellationToken token)
     {
         if (runtime is null || runtime.Count == 0) return resumed;
@@ -283,6 +389,7 @@ internal sealed class CodexProviderSessionRouter
         }
         if (runtime["collaborationMode"] is JObject)
             runtime = (JObject)CodexRuntimeIdentityContext.EnrichRequest("turn/start", runtime, model, runtime["effort"]?.Value<string>())!;
+        ApplyModelCapabilities(settings, runtime, model, provider);
         await send("thread/settings/update", runtime, token).ConfigureAwait(false);
         var effective = await send("thread/resume", new JObject
         {
@@ -383,24 +490,26 @@ internal sealed class CodexProviderSessionRouter
     {
         if (method == "account/read")
         {
-            _hasOfficialAccount = result?["account"] is JObject;
-            if (!_hasOfficialAccount && settings.Providers.Count > 0 && result is JObject account)
+            var account = result?["account"] as JObject;
+            _hasChatGptLogin = string.Equals(account?["type"]?.Value<string>(), "chatgpt", StringComparison.OrdinalIgnoreCase);
+            if (!_hasChatGptLogin && settings.Providers.Count > 0 && result is JObject accountResponse)
             {
-                var visible = (JObject)account.DeepClone();
+                var visible = (JObject)accountResponse.DeepClone();
                 visible["requiresOpenaiAuth"] = false;
                 return visible;
             }
         }
-        if (method == "model/list" && request["cursor"]?.Type != JTokenType.String)
-            return CodexProviderModelCatalog.Merge(settings, result, _hasOfficialAccount);
+        if (method == "model/list")
+            return CodexProviderModelCatalog.Merge(settings, result, _hasChatGptLogin,
+                request["cursor"]?.Type != JTokenType.String);
         if (method == "config/read" && result is JObject configuration)
         {
             var visible = (JObject)configuration.DeepClone();
             if (visible["config"] is JObject config)
             {
                 var selected = settings.DefaultModel;
-                if (string.IsNullOrWhiteSpace(selected) && !_hasOfficialAccount && settings.Providers.Count > 0)
-                    selected = CodexProviderModelCatalog.Alias(settings.Providers[0], settings.Providers[0].Models[0]);
+                if (string.IsNullOrWhiteSpace(selected) && !_hasChatGptLogin)
+                    selected = CodexProviderModelCatalog.FirstAvailableAlias(settings);
                 if (!string.IsNullOrWhiteSpace(selected)) config["model"] = selected;
                 if (!string.IsNullOrWhiteSpace(settings.ReasoningEffort)) config["model_reasoning_effort"] = settings.ReasoningEffort;
                 if (config["profile"]?.Value<string>() is string profile && config["profiles"]?[profile] is JObject profileConfig)

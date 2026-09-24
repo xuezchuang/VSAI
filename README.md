@@ -7,6 +7,18 @@
 基于 [Visual Codex Studio](https://github.com/rodrigojager/codex-visual-studio-extension) 1.3.4，保留上游历史、LICENSE 和第三方资源声明。
 本地构建输出为 `CodexVsix\VSAI.vsix`，在 Visual Studio 的“视图 → VSAI”打开。
 
+## VSAI 会话与共享记忆
+
+VSAI 的官方模型和自定义模型统一使用独立会话库。默认目录是 `%USERPROFILE%\.codex\vsai`；如果设置了 `CODEX_HOME`，则使用该目录下的 `vsai` 子目录。数据库、会话日志、归档和运行日志均留在这个私有目录，后续对话不会进入桌面端的历史列表。切换模型不会切换会话库。
+
+首次启动时仅复制原 Codex home 的配置、用户指令和模型缓存作为初始快照，后续设置页编辑的是 VSAI 自己的文件。第三方服务设置继续使用现有的加密存储。账号的 `auth.json` 不复制，私有客户端固定使用自己的文件凭据存储；已有配置中的服务参数保留。模型列表始终保留 CLI 返回的官方模型，并与第三方模型同时显示。首次使用官方订阅时，在设置 → 模型与服务 → ChatGPT 官方订阅中登录一次；登录完成后自动刷新状态与模型列表。VSAI 的登录、退出和认证检查都指向私有目录，不影响桌面端登录。
+
+首次连接会自动扫描原库的普通及已归档历史，并只读核对本地索引，识别 `codex-vsix` 创建或使用 `vsai_` 服务的会话。先在 `vsai\migration-backups` 备份原始日志；分页历史连同其依赖的原始父记录复制到新库，再由 app-server 重建独立索引，保留会话 ID。仅用作历史依赖的非 VSAI 父记录在新库归档，其桌面端原记录不变。旧格式历史通过完整副本导入。ID 对应关系和进度保存在 `vsai\session-migration-manifest.json`。验证完整历史及源文件未变化后才归档原记录，原文件不会删除。原先已归档的会话在新库中仍保持归档状态；只有初始化信息、没有对话及父历史引用的空记录仅备份，不生成空会话。
+
+正在运行、日志损坏、超出迁移大小限制或导入结果无法确认的会话会保留原记录，并提示迁移未完成；不阻止使用新库。关闭旧会话后重启 VS 可重试。若清单显示 `fork-outcome-unknown`，须先核对新库中的导入结果，不能直接清空清单重试，否则可能重复导入。旧版 WebView 缓存保留，新版使用单独缓存以避免恢复已迁移的旧 ID。
+
+共享记忆读取原 home 下的 `memories\memory_summary.md`，并指向同目录的 `MEMORY.md`、`rollout_summaries` 和 `skills`。VSAI 在创建、恢复、分叉会话时注入这份共享上下文，关闭私有库的自动记忆生成。自动整理仍由桌面端负责，VSAI 私有历史不会自动进入桌面端的记忆提炼；用户明确要求记住的内容按共享目录的 `memories\extensions\ad_hoc\notes` 流程追加。
+
 以下为上游文档，版本与公开发行信息属于上游项目。
 
 ## Visual Codex Studio (upstream)

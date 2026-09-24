@@ -217,14 +217,32 @@ function openHistory() {
     return document.getElementById('codex-vs-recent-history');
 }
 
+function waitForSearchDebounce() {
+    return new Promise(resolve => setTimeout(resolve, 230));
+}
+
 const ready = hostMessages('webview-ready');
 assert.equal(ready.length, 1, 'shim should announce webview readiness');
 
-let root = openHistory();
 let requests = hostMessages('recent-history-request');
-assert.equal(requests.length, 1);
-assert.equal(requests[0].cursor, null, 'first history page must use a null cursor');
+assert.equal(requests.length, 1, 'webview readiness should start one bounded history prefetch');
+assert.equal(requests[0].cursor, null, 'the prefetch must load the first history page');
 sendHistoryResponse(requests[0], {
+    items: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }],
+    nextCursor: 'cursor-1',
+    hasMore: true
+});
+
+let root = openHistory();
+requests = hostMessages('recent-history-request');
+assert.equal(requests.length, 2, 'opening after prefetch should refresh in the background');
+assert.deepEqual(
+    findByClass(root, 'codex-vs-history-row').map(row => row.children[0].textContent),
+    ['A', 'B'],
+    'the first opened history panel should render its completed prefetch immediately'
+);
+assert.equal(requests.at(-1).cursor, null, 'first history page must use a null cursor');
+sendHistoryResponse(requests.at(-1), {
     items: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }],
     nextCursor: 'cursor-1',
     hasMore: true
@@ -237,17 +255,15 @@ let loadMore = findByClass(root, 'codex-vs-history-load-more')[0];
 assert.ok(loadMore, 'a next cursor should render a load-more button');
 loadMore.dispatchEvent(event('click'));
 requests = hostMessages('recent-history-request');
-assert.equal(requests.length, 2);
-assert.equal(requests[1].cursor, 'cursor-1');
+assert.equal(requests.at(-1).cursor, 'cursor-1');
 assert.equal(findByClass(root, 'codex-vs-history-row').length, 2, 'loaded rows remain visible while paging');
-sendHistoryResponse(requests[1], { error: 'page failed', items: [], nextCursor: null, hasMore: false });
+sendHistoryResponse(requests.at(-1), { error: 'page failed', items: [], nextCursor: null, hasMore: false });
 assert.equal(findByClass(root, 'codex-vs-history-row').length, 2, 'a failed page keeps the first page visible');
 assert.ok(findByClass(root, 'codex-vs-history-retry').length > 0);
 findByClass(root, 'codex-vs-history-retry')[0].dispatchEvent(event('click'));
 requests = hostMessages('recent-history-request');
-assert.equal(requests.length, 3);
-assert.equal(requests[2].cursor, 'cursor-1', 'retry should reuse the failed page cursor');
-sendHistoryResponse(requests[2], {
+assert.equal(requests.at(-1).cursor, 'cursor-1', 'retry should reuse the failed page cursor');
+sendHistoryResponse(requests.at(-1), {
     items: [{ id: 'b', title: 'B duplicate' }, { id: 'c', title: 'C' }],
     nextCursor: null,
     hasMore: false
@@ -260,17 +276,110 @@ assert.equal(hostMessages('navigate-to-route').at(-1).path, '/local/c', 'history
 root = openHistory();
 requests = hostMessages('recent-history-request');
 const staleRequest = requests.at(-1);
+assert.deepEqual(
+    findByClass(root, 'codex-vs-history-row').map(row => row.children[0].textContent),
+    ['A', 'B'],
+    'reopening in the same directory should render the bounded cached first page before its refresh finishes'
+);
+assert.equal(staleRequest.cursor, null, 'the background refresh must start from the first page');
+sendHistoryResponse(staleRequest, { error: 'refresh failed', items: [], hasMore: false, nextCursor: null });
+assert.deepEqual(
+    findByClass(root, 'codex-vs-history-row').map(row => row.children[0].textContent),
+    ['A', 'B'],
+    'a background refresh failure must retain the cached rows'
+);
 window.dispatchEvent(event('message', { data: { type: 'active-workspace-roots-updated' } }));
 assert.equal(document.getElementById('codex-vs-recent-history'), null, 'directory change should close the history dialog');
+requests = hostMessages('recent-history-request');
+const workspacePrefetchRequest = requests.at(-1);
+assert.notEqual(workspacePrefetchRequest.requestId, staleRequest.requestId, 'a directory change should issue a new workspace prefetch');
 window.dispatchEvent(event('message', {
     data: { type: 'recent-history-response', requestId: staleRequest.requestId, items: [{ id: 'stale' }] }
 }));
 root = openHistory();
 requests = hostMessages('recent-history-request');
+assert.equal(requests.at(-1).requestId, workspacePrefetchRequest.requestId, 'opening during prefetch must reuse the pending request');
 assert.equal(requests.at(-1).cursor, null, 'new directory should start a fresh first page');
-sendHistoryResponse(requests.at(-1), { items: [{ id: 'new', title: 'New directory' }], hasMore: false, nextCursor: null });
+assert.equal(findByClass(root, 'codex-vs-history-row').length, 0, 'directory changes must not reuse the previous directory cache');
+assert.match(findByClass(root, 'codex-vs-history-status')[0].textContent, /Loading history/);
+sendHistoryResponse(workspacePrefetchRequest, { items: [{ id: 'new', title: 'New directory' }], hasMore: false, nextCursor: null });
 sendHistoryResponse(staleRequest, { items: [{ id: 'stale', title: 'Old directory' }], hasMore: true, nextCursor: 'old-cursor' });
 assert.deepEqual(findByClass(root, 'codex-vs-history-row').map(row => row.children[0].textContent), ['New directory']);
+findByClass(root, 'codex-vs-history-row')[0].dispatchEvent(event('click'));
+root = openHistory();
+requests = hostMessages('recent-history-request');
+const refreshRequest = requests.at(-1);
+assert.deepEqual(
+    findByClass(root, 'codex-vs-history-row').map(row => row.children[0].textContent),
+    ['New directory'],
+    'a cached first page should remain visible while the background refresh is pending'
+);
+sendHistoryResponse(refreshRequest, { items: [{ id: 'fresh', title: 'Fresh directory' }], hasMore: false, nextCursor: null });
+assert.deepEqual(findByClass(root, 'codex-vs-history-row').map(row => row.children[0].textContent), ['Fresh directory']);
+
+const search = findByClass(root, 'codex-vs-history-search')[0];
+search.value = 'legacy native match';
+search.dispatchEvent(event('input'));
+await waitForSearchDebounce();
+requests = hostMessages('recent-history-request');
+const nativeSearchRequest = requests.at(-1);
+assert.equal(nativeSearchRequest.cursor, null, 'a search begins from the first page');
+assert.equal(nativeSearchRequest.searchTerm, 'legacy native match', 'the complete query must reach the native history list');
+sendHistoryResponse(nativeSearchRequest, {
+    items: [{ id: 'native', title: 'Untitled task', workspaceName: 'D:/workspace' }],
+    hasMore: true,
+    nextCursor: 'native-cursor'
+});
+assert.deepEqual(
+    findByClass(root, 'codex-vs-history-row').map(row => row.children[0].textContent),
+    ['Untitled task'],
+    'a native search hit must remain visible even when its rendered metadata does not contain the query'
+);
+loadMore = findByClass(root, 'codex-vs-history-load-more')[0];
+loadMore.dispatchEvent(event('click'));
+requests = hostMessages('recent-history-request');
+const nativeSearchMoreRequest = requests.at(-1);
+assert.equal(nativeSearchMoreRequest.cursor, 'native-cursor');
+assert.equal(nativeSearchMoreRequest.searchTerm, 'legacy native match', 'search pagination must retain its query');
+sendHistoryResponse(nativeSearchMoreRequest, {
+    items: [{ id: 'older-native', title: 'Older task', workspaceName: 'D:/workspace' }],
+    hasMore: false,
+    nextCursor: null
+});
+assert.deepEqual(
+    findByClass(root, 'codex-vs-history-row').map(row => row.children[0].textContent),
+    ['Untitled task', 'Older task'],
+    'search page append must keep prior native hits visible'
+);
+
+search.value = 'obsolete search';
+search.dispatchEvent(event('input'));
+await waitForSearchDebounce();
+requests = hostMessages('recent-history-request');
+const obsoleteSearchRequest = requests.at(-1);
+search.value = 'current search';
+search.dispatchEvent(event('input'));
+await waitForSearchDebounce();
+requests = hostMessages('recent-history-request');
+const currentSearchRequest = requests.at(-1);
+assert.equal(currentSearchRequest.searchTerm, 'current search');
+sendHistoryResponse(obsoleteSearchRequest, { items: [{ id: 'obsolete', title: 'Obsolete result' }], hasMore: false, nextCursor: null });
+sendHistoryResponse(currentSearchRequest, { items: [{ id: 'current', title: 'Current result' }], hasMore: false, nextCursor: null });
+assert.deepEqual(findByClass(root, 'codex-vs-history-row').map(row => row.children[0].textContent), ['Current result']);
+
+search.value = '';
+search.dispatchEvent(event('input'));
+assert.deepEqual(
+    findByClass(root, 'codex-vs-history-row').map(row => row.children[0].textContent),
+    ['Fresh directory'],
+    'clearing a search must immediately restore the unfiltered first-page cache'
+);
+await waitForSearchDebounce();
+requests = hostMessages('recent-history-request');
+const unfilteredRefreshRequest = requests.at(-1);
+assert.equal(unfilteredRefreshRequest.searchTerm, undefined, 'unfiltered refreshes must not send a search term');
+sendHistoryResponse(unfilteredRefreshRequest, { items: [{ id: 'fresh-after-search', title: 'Fresh after search' }], hasMore: false, nextCursor: null });
+assert.deepEqual(findByClass(root, 'codex-vs-history-row').map(row => row.children[0].textContent), ['Fresh after search']);
 
 window.dispatchEvent(event('message', { data: { type: 'active-workspace-roots-updated' } }));
 root = openHistory();
@@ -280,5 +389,12 @@ assert.ok(findByClass(root, 'codex-vs-history-retry').length > 0, 'a failed page
 findByClass(root, 'codex-vs-history-retry')[0].dispatchEvent(event('click'));
 requests = hostMessages('recent-history-request');
 assert.equal(requests.at(-1).cursor, null, 'retry should repeat the failed page');
+const requestCountBeforeClose = requests.length;
+const closingSearch = findByClass(root, 'codex-vs-history-search')[0];
+closingSearch.value = 'cancelled query';
+closingSearch.dispatchEvent(event('input'));
+findByClass(root, 'codex-vs-history-close')[0].dispatchEvent(event('click'));
+await waitForSearchDebounce();
+assert.equal(hostMessages('recent-history-request').length, requestCountBeforeClose, 'closing the dialog must cancel a pending search debounce');
 
 console.log('Codex history shim pagination, deduplication, retry, and directory invalidation checks passed.');

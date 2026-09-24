@@ -82,7 +82,10 @@ public sealed class CodexToolWindow : ToolWindowPane
                 return;
             }
 
-            _webViewHost = new CodexOfficialWebViewHost(_viewModel);
+            // Compose with VS tool windows and keep the page alive across docking hosts.
+            _webViewHost = new CodexOfficialWebViewHost(
+                _viewModel,
+                hostingMode: CodexOfficialWebViewHostingMode.Composition);
             _webViewHost.Ready += OnWebViewReady;
             _webViewHost.FallbackRequested += OnWebViewFallbackRequested;
             Content = _webViewHost;

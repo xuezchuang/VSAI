@@ -13,8 +13,16 @@ namespace CodexVsix.Services;
 /// <summary>Appends explicit custom model metadata without replacing the official catalog.</summary>
 internal static class CodexProviderModelCatalogFile
 {
+    internal const string RuntimeDescription = "VSAI generated provider model metadata";
+
     internal static bool HasOverrides(CodexExtensionSettings settings)
-        => settings.Providers?.Any(p => p?.ContextWindows?.Count > 0) == true;
+        => HasLegacyOverrides(settings) || settings.Providers?.Any(provider => provider?.Catalog is not null
+            && CodexProviderCatalogConfigurationService.GetEffectiveModels(provider)
+                .Any(HasRuntimeMetadata)) == true;
+
+    internal static bool HasLegacyOverrides(CodexExtensionSettings settings)
+        => settings.Providers?.Any(provider => provider?.Catalog is null
+            && provider!.ContextWindows?.Count > 0) == true;
 
     internal static JObject? Merge(JObject baseline, CodexExtensionSettings settings)
     {
@@ -33,7 +41,8 @@ internal static class CodexProviderModelCatalogFile
         }
 
         var additions = new SortedDictionary<string, JObject>(StringComparer.Ordinal);
-        foreach (var provider in settings.Providers)
+        var legacyProviders = settings.Providers.Where(provider => provider?.Catalog is null).ToArray();
+        foreach (var provider in legacyProviders)
         {
             if (provider?.ContextWindows is null) continue;
             foreach (var pair in provider.ContextWindows)
@@ -44,18 +53,39 @@ internal static class CodexProviderModelCatalogFile
                 if (originalSlugs.Contains(pair.Key))
                     throw new InvalidDataException("自定义模型 ID 与原模型目录冲突，不能覆盖原模型容量。");
 
-                var candidate = CreateModel(provider, pair.Key, pair.Value);
-                foreach (var other in settings.Providers.Where(p => p is not null
+                var candidate = CreateLegacyModel(provider, pair.Key, pair.Value);
+                foreach (var other in legacyProviders.Where(p => p is not null
                     && p.Models?.Contains(pair.Key, StringComparer.Ordinal) == true))
                 {
                     if (other.ContextWindows is null || !other.ContextWindows.TryGetValue(pair.Key, out var otherWindow)
                         || otherWindow != pair.Value
-                        || !JToken.DeepEquals(candidate, CreateModel(other, pair.Key, otherWindow)))
+                        || !JToken.DeepEquals(candidate, CreateLegacyModel(other, pair.Key, otherWindow)))
                         throw new InvalidDataException("多个服务使用相同模型 ID，但模型容量或推理设置不同。");
                 }
                 additions[pair.Key] = candidate;
             }
         }
+
+        // Catalog-backed providers are discovered data, not explicit global overrides. The CLI
+        // accepts only one process catalog, so ambiguous IDs must retain native metadata instead
+        // of making the whole catalog unusable.
+        var automaticGroups = settings.Providers.Where(provider => provider?.Catalog is not null)
+            .SelectMany(provider => CodexProviderCatalogConfigurationService.GetEffectiveModels(provider))
+            .GroupBy(model => model.Id, StringComparer.Ordinal);
+        foreach (var group in automaticGroups)
+        {
+            if (originalSlugs.Contains(group.Key) || additions.ContainsKey(group.Key)
+                || legacyProviders.Any(provider => provider?.Models?.Contains(group.Key, StringComparer.Ordinal) == true)
+                || group.Any(model => model.SupportsResponses == false || model.SupportsTools == false || !HasRuntimeMetadata(model)))
+                continue;
+            var candidates = group.Select(CreateDiscoveredModel).ToArray();
+            var candidate = candidates[0];
+            if (candidates.All(other => JToken.DeepEquals(candidate, other))) additions[group.Key] = candidate;
+        }
+
+        // Avoid replacing the native ModelsManager with an identical static snapshot when every
+        // discovered override was unsafe to apply.
+        if (additions.Count == 0) return null;
 
         var merged = (JObject)baseline.DeepClone();
         var models = (JArray)merged["models"]!;
@@ -102,7 +132,10 @@ internal static class CodexProviderModelCatalogFile
             throw new InvalidDataException("生成的模型目录已被修改，无法安全复用。");
     }
 
-    private static JObject CreateModel(CodexProviderConfiguration provider, string model, long contextWindow)
+    private static bool HasRuntimeMetadata(CodexProviderModelMetadata model)
+        => model.ContextWindow is > 0;
+
+    private static JObject CreateLegacyModel(CodexProviderConfiguration provider, string model, long contextWindow)
     {
         var efforts = provider.ReasoningEfforts?.TryGetValue(model, out var configured) == true
             && configured is not null ? configured.Distinct(StringComparer.Ordinal).ToArray()
@@ -113,11 +146,51 @@ internal static class CodexProviderModelCatalogFile
         var defaultEffort = provider.DefaultReasoningEfforts?.TryGetValue(model, out var selected) == true
             && efforts.Contains(selected, StringComparer.Ordinal) ? selected
             : efforts.Contains("medium", StringComparer.Ordinal) ? "medium" : efforts[0];
-        return new JObject
+        return CreateModelInfo(
+            model,
+            model,
+            efforts,
+            defaultEffort,
+            contextWindow,
+            supportsImages: false,
+            supportsParallelTools: true,
+            supportsReasoning: false);
+    }
+
+    private static JObject CreateDiscoveredModel(CodexProviderModelMetadata metadata)
+    {
+        var efforts = metadata.SupportsReasoning == false
+            ? Array.Empty<string>()
+            : metadata.ReasoningEfforts?.ToArray() ?? Array.Empty<string>();
+        var defaultEffort = metadata.DefaultReasoningEffort is not null
+            && efforts.Contains(metadata.DefaultReasoningEffort, StringComparer.Ordinal)
+                ? metadata.DefaultReasoningEffort : null;
+        return CreateModelInfo(
+            metadata.Id,
+            metadata.DisplayName ?? metadata.Id,
+            efforts,
+            defaultEffort,
+            metadata.ContextWindow,
+            metadata.SupportsImages == true,
+            supportsParallelTools: false,
+            supportsReasoning: efforts.Length > 0);
+    }
+
+    private static JObject CreateModelInfo(
+        string model,
+        string displayName,
+        IReadOnlyList<string> efforts,
+        string? defaultEffort,
+        long? contextWindow,
+        bool supportsImages,
+        bool supportsParallelTools,
+        bool supportsReasoning)
+    {
+        var result = new JObject
         {
-            ["slug"] = model, ["display_name"] = model,
-            ["description"] = "Custom Responses API model",
-            ["default_reasoning_level"] = defaultEffort,
+            ["slug"] = model, ["display_name"] = displayName,
+            ["description"] = RuntimeDescription,
+            ["default_reasoning_level"] = defaultEffort is null ? JValue.CreateNull() : defaultEffort,
             ["supported_reasoning_levels"] = new JArray(efforts.Select(e => new JObject
             {
                 ["effort"] = e, ["description"] = "Request " + e + " reasoning effort."
@@ -125,15 +198,21 @@ internal static class CodexProviderModelCatalogFile
             ["shell_type"] = "shell_command", ["visibility"] = "list", ["supported_in_api"] = true,
             ["priority"] = 100, ["availability_nux"] = null, ["upgrade"] = null,
             ["base_instructions"] = "You are a coding assistant.",
-            ["supports_reasoning_summaries"] = false, ["default_reasoning_summary"] = "none",
+            ["supports_reasoning_summaries"] = supportsReasoning, ["default_reasoning_summary"] = "none",
             ["support_verbosity"] = false, ["default_verbosity"] = null,
             ["apply_patch_tool_type"] = "freeform", ["web_search_tool_type"] = "text_and_image",
             ["truncation_policy"] = new JObject { ["mode"] = "tokens", ["limit"] = 10000 },
-            ["supports_parallel_tool_calls"] = true, ["supports_image_detail_original"] = false,
-            ["context_window"] = contextWindow, ["max_context_window"] = contextWindow,
+            ["supports_parallel_tool_calls"] = supportsParallelTools, ["supports_image_detail_original"] = false,
             ["effective_context_window_percent"] = 95,
-            ["experimental_supported_tools"] = new JArray(), ["input_modalities"] = new JArray("text"),
+            ["experimental_supported_tools"] = new JArray(),
+            ["input_modalities"] = supportsImages ? new JArray("text", "image") : new JArray("text"),
             ["supports_search_tool"] = false
         };
+        if (contextWindow is > 0)
+        {
+            result["context_window"] = contextWindow.Value;
+            result["max_context_window"] = contextWindow.Value;
+        }
+        return result;
     }
 }

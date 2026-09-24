@@ -8,13 +8,14 @@ using Newtonsoft.Json;
 
 namespace CodexVsix.Services;
 
-// Keep the upstream bundle immutable. These version-guarded copies only extend the
-// frozen UI's effort labels/normalizer; the model catalog still controls availability.
+// Keep the upstream bundle immutable. Version-guarded runtime copies adapt effort
+// controls and the fork protocol; the model catalog still controls availability.
 internal static class CodexReasoningEffortWebViewCompatibility
 {
     internal const string ComposerModule = "composer-B3BCMq_W.js";
     internal const string LabelModule = "reasoning-minimal-BmczWw15.js";
     internal const string SettingsModule = "use-model-settings-D_RJ6qrG.js";
+    internal const string ModelQueriesModule = "model-queries-BOnPKCmp.js";
     internal const string AssetBaseUrl = "https://" + CodexOfficialWebViewShell.AssetHostName + "/webview/assets/";
 
     private static readonly IReadOnlyDictionary<string, string> ModuleHashes =
@@ -22,7 +23,9 @@ internal static class CodexReasoningEffortWebViewCompatibility
         {
             [ComposerModule] = "03b05c10f98be300790c094ee70d258907835c2cbcddc5b382d1dc97ed1f6b8d",
             [LabelModule] = "752677eaa4d9f3021b6ac4a05c6a0f778301ad2d4449f655bb01afa9316e0907",
-            [SettingsModule] = "1fc45f6af86f26d85b653b2c835210dc9f999752527e8e824b5fc229045d2c6c"
+            [SettingsModule] = "1fc45f6af86f26d85b653b2c835210dc9f999752527e8e824b5fc229045d2c6c",
+            [ModelQueriesModule] = "9713d9213242bdcf73c3a15acff4323388d2b6b9922c073616536936dde700e5",
+            [CodexConversationForkWebViewCompatibility.ManagerModule] = "2250fa42452e7629d8c4194f9d2d0e849f232ad05d1286886caae960e0ec945d"
         };
 
     private static readonly Regex RelativeAssetLiteral = new(
@@ -72,18 +75,27 @@ internal static class CodexReasoningEffortWebViewCompatibility
             if (!ModuleHashes.TryGetValue(moduleName, out var expected)
                 || !string.Equals(digest, expected, StringComparison.Ordinal))
             {
-                throw new InvalidDataException("The frozen Codex reasoning module has changed: " + moduleName);
+                throw new InvalidDataException("The frozen Codex compatibility module has changed: " + moduleName);
             }
         }
 
         switch (moduleName)
         {
+            case CodexConversationForkWebViewCompatibility.ManagerModule:
+                source = CodexConversationForkWebViewCompatibility.AdaptModule(source);
+                break;
             case ComposerModule:
                 // Reuse the existing highest-effort glyph, without changing the value
                 // used by the menu, selection callback, telemetry or request payload.
                 source = ReplaceOnce(source,
                     "var qp={none:Aa,minimal:Aa,low:Oa,medium:Ea,high:wa,xhigh:Sa};",
                     "var qp={none:Aa,minimal:Aa,low:Oa,medium:Ea,high:wa,xhigh:Sa,max:Sa,ultra:Sa};");
+                // VSAI runs in the current local workspace. Keep the location picker
+                // hidden for follow-ups too: upstream only auto-hides it before a
+                // conversation ID exists when there is no Git repository.
+                source = ReplaceOnce(source,
+                    "hideRunLocationDropdown:jl,showWorkspaceDropdown:F&&!G,",
+                    "hideRunLocationDropdown:!0,showWorkspaceDropdown:F&&!G,");
                 break;
             case LabelModule:
                 source = ReplaceOnce(source,
@@ -94,23 +106,35 @@ internal static class CodexReasoningEffortWebViewCompatibility
                 source = ReplaceOnce(source,
                     "function R(e,t){return(e===`none`||e===`minimal`||e===`low`||e===`medium`||e===`high`||e===`xhigh`)&&t.includes(e)?e:k}",
                     "function R(e,t){return(e===`none`||e===`minimal`||e===`low`||e===`medium`||e===`high`||e===`xhigh`||e===`max`||e===`ultra`)&&t.includes(e)?e:k}");
+                // The saved model/effort query must follow the same manual refresh
+                // policy as the catalog, including both of its UI observers.
+                source = ReplaceOnce(source,
+                    "queryKey:[...N,t,n],staleTime:_.FIVE_MINUTES",
+                    "queryKey:[...N,t,n],staleTime:Infinity,refetchOnWindowFocus:!1,refetchOnReconnect:!1,refetchInterval:!1");
+                break;
+            case ModelQueriesModule:
+                // Load once, then refresh only when an explicit catalog/config change
+                // invalidates the query. Focus and elapsed time must preserve selection.
+                source = ReplaceOnce(source,
+                    "staleTime:u.FIVE_MINUTES,queryFn:()=>i(`list-models-for-host`",
+                    "staleTime:Infinity,refetchOnWindowFocus:!1,refetchOnReconnect:!1,refetchInterval:!1,queryFn:()=>i(`list-models-for-host`");
                 break;
         }
 
         // Moving a module changes its base URL. Anchor every asset literal (including
         // Vite's lazy-import/preload arrays and CSS) to the original immutable bundle.
-        // Absolute imports still pass through the import map for the three adapters.
+        // Absolute imports still pass through the import map for the guarded adapters.
         source = RelativeAssetLiteral.Replace(source,
             match => match.Groups[1].Value + AssetBaseUrl + match.Groups[2].Value + match.Groups[1].Value);
         return source;
     }
 
-    private static string ReplaceOnce(string source, string before, string after)
+    internal static string ReplaceOnce(string source, string before, string after)
     {
         var index = source.IndexOf(before, StringComparison.Ordinal);
         if (index < 0 || source.IndexOf(before, index + before.Length, StringComparison.Ordinal) >= 0)
         {
-            throw new InvalidDataException("The frozen Codex reasoning adapter does not match exactly once.");
+            throw new InvalidDataException("The frozen Codex compatibility adapter does not match exactly once.");
         }
 
         return source.Substring(0, index) + after + source.Substring(index + before.Length);

@@ -302,13 +302,23 @@
     let recentHistoryRequestId = null;
     let recentHistoryRequestSequence = 0;
     let recentHistoryItems = [];
+    let recentHistoryItemsSearchTerm = '';
     let recentHistoryLoading = false;
     let recentHistoryError = false;
     let recentHistoryHasMore = false;
     let recentHistoryNextCursor = null;
     let recentHistoryRequestCursor = null;
     let recentHistoryRequestAppend = false;
+    let recentHistoryRequestWorkspaceEpoch = null;
+    let recentHistoryRequestSearchTerm = '';
     let recentHistoryElements = null;
+    let recentHistorySearchTerm = '';
+    let recentHistorySearchDebounceTimer = null;
+    let recentHistoryWorkspaceEpoch = 0;
+    let recentHistoryCache = null;
+    let recentHistoryPrefetchRequestId = null;
+    let recentHistoryPrefetchWorkspaceEpoch = null;
+    let recentHistoryPrefetchAttemptedWorkspaceEpoch = null;
 
     function normalizeHistorySearchValue(value) {
         const text = String(value || '').toLowerCase();
@@ -317,6 +327,10 @@
         } catch {
             return text;
         }
+    }
+
+    function normalizeRecentHistorySearchTerm(value) {
+        return String(value || '').trim().slice(0, 240);
     }
 
     function formatHistoryTimestamp(value) {
@@ -336,6 +350,55 @@
         }
     }
 
+    function cloneHistoryItems(items) {
+        return items.slice(0, 50).map(function (item) {
+            return {
+                id: item.id,
+                title: item.title,
+                workspaceName: item.workspaceName,
+                updatedAt: item.updatedAt
+            };
+        });
+    }
+
+    function restoreRecentHistoryCache() {
+        if (!recentHistoryCache || recentHistoryCache.workspaceEpoch !== recentHistoryWorkspaceEpoch) return;
+        recentHistoryItems = cloneHistoryItems(recentHistoryCache.items);
+        recentHistoryItemsSearchTerm = '';
+        recentHistoryHasMore = recentHistoryCache.hasMore;
+        recentHistoryNextCursor = recentHistoryCache.nextCursor;
+    }
+
+    function cacheRecentHistoryFirstPage() {
+        if (recentHistoryRequestAppend || recentHistoryRequestSearchTerm.length > 0) return;
+        recentHistoryCache = {
+            workspaceEpoch: recentHistoryWorkspaceEpoch,
+            items: cloneHistoryItems(recentHistoryItems),
+            hasMore: recentHistoryHasMore,
+            nextCursor: recentHistoryNextCursor
+        };
+    }
+
+    function invalidateRecentHistoryCache() {
+        recentHistoryWorkspaceEpoch++;
+        recentHistoryCache = null;
+        recentHistoryPrefetchRequestId = null;
+        recentHistoryPrefetchWorkspaceEpoch = null;
+        recentHistoryPrefetchAttemptedWorkspaceEpoch = null;
+    }
+
+    function startRecentHistoryPrefetch() {
+        if (recentHistoryPrefetchAttemptedWorkspaceEpoch === recentHistoryWorkspaceEpoch) return;
+        recentHistoryPrefetchAttemptedWorkspaceEpoch = recentHistoryWorkspaceEpoch;
+        recentHistoryPrefetchWorkspaceEpoch = recentHistoryWorkspaceEpoch;
+        recentHistoryPrefetchRequestId = appSessionId + '-history-' + (++recentHistoryRequestSequence);
+        postToHost({
+            type: 'recent-history-request',
+            requestId: recentHistoryPrefetchRequestId,
+            cursor: null
+        });
+    }
+
     function closeRecentHistory(restoreFocus) {
         const root = recentHistoryRoot;
         const trigger = recentHistoryTrigger;
@@ -343,12 +406,20 @@
         recentHistoryTrigger = null;
         recentHistoryRequestId = null;
         recentHistoryItems = [];
+        recentHistoryItemsSearchTerm = '';
         recentHistoryLoading = false;
         recentHistoryError = false;
         recentHistoryHasMore = false;
         recentHistoryNextCursor = null;
         recentHistoryRequestCursor = null;
         recentHistoryRequestAppend = false;
+        recentHistoryRequestWorkspaceEpoch = null;
+        recentHistoryRequestSearchTerm = '';
+        recentHistorySearchTerm = '';
+        if (recentHistorySearchDebounceTimer !== null) {
+            clearTimeout(recentHistorySearchDebounceTimer);
+            recentHistorySearchDebounceTimer = null;
+        }
         recentHistoryElements = null;
         if (root) root.remove();
         if (restoreFocus !== false && trigger && trigger.isConnected) {
@@ -360,14 +431,28 @@
         }
     }
 
-    function requestRecentHistory(cursor, append) {
+    function requestRecentHistory(cursor, append, searchTerm) {
         if (!recentHistoryRoot || recentHistoryLoading) return;
         const pageCursor = typeof cursor === 'string' && cursor.length > 0 ? cursor : null;
         const appendPage = append === true;
-        recentHistoryRequestId = appSessionId + '-history-' + (++recentHistoryRequestSequence);
+        const requestSearchTerm = normalizeRecentHistorySearchTerm(searchTerm);
+        const canUsePendingPrefetch = !appendPage && pageCursor === null &&
+            requestSearchTerm.length === 0 &&
+            recentHistoryPrefetchRequestId !== null &&
+            recentHistoryPrefetchWorkspaceEpoch === recentHistoryWorkspaceEpoch;
+        recentHistoryRequestId = canUsePendingPrefetch
+            ? recentHistoryPrefetchRequestId
+            : appSessionId + '-history-' + (++recentHistoryRequestSequence);
+        if (canUsePendingPrefetch) {
+            recentHistoryPrefetchRequestId = null;
+            recentHistoryPrefetchWorkspaceEpoch = null;
+        }
         recentHistoryRequestCursor = pageCursor;
         recentHistoryRequestAppend = appendPage;
-        if (!appendPage) {
+        recentHistoryRequestWorkspaceEpoch = recentHistoryWorkspaceEpoch;
+        recentHistoryRequestSearchTerm = requestSearchTerm;
+        const preserveVisibleItems = !appendPage && pageCursor === null && recentHistoryItems.length > 0;
+        if (!appendPage && !preserveVisibleItems) {
             recentHistoryItems = [];
             recentHistoryHasMore = false;
             recentHistoryNextCursor = null;
@@ -375,15 +460,50 @@
         recentHistoryLoading = true;
         recentHistoryError = false;
         renderRecentHistory();
-        postToHost({
-            type: 'recent-history-request',
-            requestId: recentHistoryRequestId,
-            cursor: pageCursor
-        });
+        if (!canUsePendingPrefetch) {
+            const message = {
+                type: 'recent-history-request',
+                requestId: recentHistoryRequestId,
+                cursor: pageCursor
+            };
+            if (requestSearchTerm.length > 0) {
+                message.searchTerm = requestSearchTerm;
+            }
+            postToHost(message);
+        }
     }
 
     function retryRecentHistory() {
-        requestRecentHistory(recentHistoryRequestCursor, recentHistoryRequestAppend);
+        requestRecentHistory(recentHistoryRequestCursor, recentHistoryRequestAppend, recentHistoryRequestSearchTerm);
+    }
+
+    function scheduleRecentHistorySearch() {
+        if (!recentHistoryElements) return;
+        const nextSearchTerm = normalizeRecentHistorySearchTerm(recentHistoryElements.search.value);
+        if (nextSearchTerm === recentHistorySearchTerm) {
+            renderRecentHistory();
+            return;
+        }
+        recentHistorySearchTerm = nextSearchTerm;
+        if (recentHistoryRequestId !== null && recentHistoryRequestSearchTerm !== nextSearchTerm) {
+            recentHistoryRequestId = null;
+            recentHistoryRequestWorkspaceEpoch = null;
+            recentHistoryLoading = false;
+            recentHistoryError = false;
+        }
+        if (recentHistorySearchDebounceTimer !== null) {
+            clearTimeout(recentHistorySearchDebounceTimer);
+        }
+        if (nextSearchTerm.length === 0) {
+            restoreRecentHistoryCache();
+        }
+        renderRecentHistory();
+        recentHistorySearchDebounceTimer = setTimeout(function () {
+            recentHistorySearchDebounceTimer = null;
+            if (recentHistoryRoot) {
+                requestRecentHistory(null, false, recentHistorySearchTerm);
+            }
+        }, 200);
     }
 
     function renderRecentHistory() {
@@ -422,12 +542,15 @@
             return;
         }
 
-        const queryValue = normalizeHistorySearchValue(elements.search.value.trim());
-        const filteredItems = recentHistoryItems.filter(function (item) {
-            if (!queryValue) return true;
-            return normalizeHistorySearchValue(item.title).includes(queryValue) ||
-                normalizeHistorySearchValue(item.workspaceName).includes(queryValue);
-        });
+        const queryValue = recentHistorySearchTerm;
+        const filteredItems = recentHistoryItemsSearchTerm === queryValue
+            ? recentHistoryItems
+            : recentHistoryItems.filter(function (item) {
+                const normalizedQuery = normalizeHistorySearchValue(queryValue);
+                return normalizedQuery.length === 0 ||
+                    normalizeHistorySearchValue(item.title).includes(normalizedQuery) ||
+                    normalizeHistorySearchValue(item.workspaceName).includes(normalizedQuery);
+            });
 
         if (filteredItems.length === 0) {
             elements.status.textContent = strings.historyEmpty;
@@ -477,7 +600,7 @@
             (count === 1 ? strings.historyLocalSingular : strings.historyLocalPlural) +
             (recentHistoryHasMore ? ' ' + strings.historyMoreAvailable : '');
         elements.footer.appendChild(countLabel);
-        if (recentHistoryHasMore) {
+        if (recentHistoryHasMore && recentHistoryItemsSearchTerm === queryValue) {
             const loadMore = document.createElement('button');
             loadMore.type = 'button';
             loadMore.className = 'codex-vs-history-load-more';
@@ -486,7 +609,7 @@
                 : strings.historyLoadMore;
             loadMore.disabled = recentHistoryLoading;
             loadMore.addEventListener('click', function () {
-                requestRecentHistory(recentHistoryNextCursor, true);
+                requestRecentHistory(recentHistoryNextCursor, true, recentHistoryItemsSearchTerm);
             });
             elements.footer.appendChild(loadMore);
         }
@@ -536,7 +659,7 @@
         search.className = 'codex-vs-history-search';
         search.placeholder = strings.historySearch;
         search.setAttribute('aria-label', strings.historySearch);
-        search.addEventListener('input', renderRecentHistory);
+        search.addEventListener('input', scheduleRecentHistorySearch);
         searchWrap.appendChild(search);
 
         const content = document.createElement('div');
@@ -569,30 +692,42 @@
 
         recentHistoryRoot = root;
         recentHistoryElements = { search: search, status: status, list: list, footer: footer };
+        recentHistorySearchTerm = '';
+        restoreRecentHistoryCache();
         document.body.appendChild(root);
-        requestRecentHistory(null, false);
+        requestRecentHistory(null, false, '');
         window.requestAnimationFrame(function () {
             if (recentHistoryRoot === root) search.focus();
         });
     }
 
     function handleRecentHistoryResponse(data) {
-        if (!recentHistoryRoot || data.requestId !== recentHistoryRequestId) return;
+        if (recentHistoryPrefetchRequestId !== null && data.requestId === recentHistoryPrefetchRequestId) {
+            const prefetchWorkspaceEpoch = recentHistoryPrefetchWorkspaceEpoch;
+            recentHistoryPrefetchRequestId = null;
+            recentHistoryPrefetchWorkspaceEpoch = null;
+            if (prefetchWorkspaceEpoch === recentHistoryWorkspaceEpoch &&
+                !(typeof data.error === 'string' && data.error.length > 0)) {
+                const pageItems = normalizeRecentHistoryItems(data.items);
+                recentHistoryCache = {
+                    workspaceEpoch: recentHistoryWorkspaceEpoch,
+                    items: cloneHistoryItems(pageItems),
+                    hasMore: data.hasMore === true && typeof data.nextCursor === 'string' && data.nextCursor.length > 0,
+                    nextCursor: typeof data.nextCursor === 'string' && data.nextCursor.length > 0 ? data.nextCursor : null
+                };
+            }
+            return;
+        }
+        if (!recentHistoryRoot ||
+            data.requestId !== recentHistoryRequestId ||
+            recentHistoryRequestWorkspaceEpoch !== recentHistoryWorkspaceEpoch) return;
         recentHistoryLoading = false;
         recentHistoryError = typeof data.error === 'string' && data.error.length > 0;
         if (recentHistoryError) {
             renderRecentHistory();
             return;
         }
-        const pageItems = Array.isArray(data.items) ? data.items.slice(0, 50).map(function (item) {
-            if (!item || typeof item !== 'object' || typeof item.id !== 'string') return null;
-            return {
-                id: item.id.slice(0, 256),
-                title: typeof item.title === 'string' ? item.title.slice(0, 240) : '',
-                workspaceName: typeof item.workspaceName === 'string' ? item.workspaceName.slice(0, 260) : '',
-                updatedAt: typeof item.updatedAt === 'string' || typeof item.updatedAt === 'number' ? item.updatedAt : null
-            };
-        }).filter(function (item) { return item && item.id.length > 0; }) : [];
+        const pageItems = normalizeRecentHistoryItems(data.items);
         const mergedItems = recentHistoryRequestAppend ? recentHistoryItems.concat(pageItems) : pageItems;
         const seen = new Set();
         recentHistoryItems = mergedItems.filter(function (item) {
@@ -604,7 +739,21 @@
             ? data.nextCursor
             : null;
         recentHistoryHasMore = data.hasMore === true && recentHistoryNextCursor !== null;
+        recentHistoryItemsSearchTerm = recentHistoryRequestSearchTerm;
+        cacheRecentHistoryFirstPage();
         renderRecentHistory();
+    }
+
+    function normalizeRecentHistoryItems(items) {
+        return Array.isArray(items) ? items.slice(0, 50).map(function (item) {
+            if (!item || typeof item !== 'object' || typeof item.id !== 'string') return null;
+            return {
+                id: item.id.slice(0, 256),
+                title: typeof item.title === 'string' ? item.title.slice(0, 240) : '',
+                workspaceName: typeof item.workspaceName === 'string' ? item.workspaceName.slice(0, 260) : '',
+                updatedAt: typeof item.updatedAt === 'string' || typeof item.updatedAt === 'number' ? item.updatedAt : null
+            };
+        }).filter(function (item) { return item && item.id.length > 0; }) : [];
     }
 
     function findRecentHistoryTrigger(target) {
@@ -808,7 +957,9 @@
         if (data.type === 'recent-history-response') {
             handleRecentHistoryResponse(data);
         } else if (data.type === 'active-workspace-roots-updated') {
+            invalidateRecentHistoryCache();
             closeRecentHistory(false);
+            startRecentHistoryPrefetch();
         } else if (data.type === 'navigate-to-route' && recentHistoryRoot) {
             closeRecentHistory(false);
         }
@@ -888,4 +1039,5 @@
     window.electronBridge = Object.assign({}, bridgeDefaults, window.electronBridge || {});
     window.__CODEX_THEIA_BRIDGE__ = { appSessionId: appSessionId, buildFlavor: BUILD_FLAVOR, webviewId: webviewId };
     postToHost({ type: 'webview-ready' });
+    startRecentHistoryPrefetch();
 })();

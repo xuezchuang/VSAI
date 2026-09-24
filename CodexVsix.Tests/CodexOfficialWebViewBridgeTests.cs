@@ -214,6 +214,22 @@ public sealed class CodexOfficialWebViewBridgeTests
         Assert.Empty(Assert.IsType<JArray>(parameters["modelProviders"]));
     }
 
+    [Fact]
+    public void HistorySearchReachesTheServerWithItsCursorAndWorkspaceScope()
+    {
+        var parameters = CodexOfficialWebViewBridge.BuildRecentConversationRefreshParams(new JObject
+        {
+            ["searchTerm"] = "  重新讲解  ", ["cursor"] = "older-search-page"
+        });
+        var scoped = CodexOfficialWebViewBridge.PrepareWorkspaceHistoryParams(parameters, @"D:\工程");
+
+        Assert.Equal("重新讲解", scoped["searchTerm"]?.Value<string>());
+        Assert.Equal("older-search-page", scoped["cursor"]?.Value<string>());
+        Assert.Equal(@"D:\工程", scoped["cwd"]?[0]?.Value<string>());
+        Assert.Null(CodexOfficialWebViewBridge.BuildRecentConversationRefreshParams(
+            new JObject { ["searchTerm"] = "  " })["searchTerm"]);
+    }
+
     [Theory]
     [InlineData(@"D:\work\project", @"D:\work\project", @"\\?\D:\work\project")]
     [InlineData(@"\\?\D:\work\project\", @"D:\work\project", @"\\?\D:\work\project")]

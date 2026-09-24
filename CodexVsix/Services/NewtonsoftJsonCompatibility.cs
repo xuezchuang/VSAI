@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -6,6 +7,13 @@ namespace CodexVsix.Services;
 
 internal static class NewtonsoftJsonCompatibility
 {
+    internal static JToken ParseProtocolValue(string json)
+    {
+        // Cursors and message text are opaque strings, even if they resemble dates.
+        using var reader = new JsonTextReader(new StringReader(json)) { DateParseHandling = DateParseHandling.None };
+        return JToken.Load(reader);
+    }
+
     internal static string Serialize(JToken token, Formatting formatting)
     {
         if (token is null)

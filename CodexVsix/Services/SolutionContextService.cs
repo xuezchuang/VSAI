@@ -191,24 +191,24 @@ public sealed class SolutionContextService
             .ToList();
     }
 
-    public string GetCodexConfigPath()
+    public string GetCodexConfigPath(string? environmentVariables = null)
     {
-        return Path.Combine(GetCodexHomeDirectory(), "config.toml");
+        return Path.Combine(GetCodexHomeDirectory(environmentVariables), "config.toml");
     }
 
-    public string GetCodexHomeDirectory()
+    public string GetCodexHomeDirectory(string? environmentVariables = null)
     {
-        return CodexEnvironmentPathHelper.GetCodexHomeDirectory();
+        return CodexEnvironmentPathHelper.GetCodexHomeDirectory(environmentVariables);
     }
 
-    public string GetCodexSkillsDirectory()
+    public string GetCodexSkillsDirectory(string? environmentVariables = null)
     {
-        return Path.Combine(GetCodexHomeDirectory(), "skills");
+        return Path.Combine(GetCodexHomeDirectory(environmentVariables), "skills");
     }
 
-    public void OpenCodexConfig()
+    public void OpenCodexConfig(string? environmentVariables = null)
     {
-        var path = GetCodexConfigPath();
+        var path = GetCodexConfigPath(environmentVariables);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         if (!File.Exists(path))
         {
@@ -222,9 +222,9 @@ public sealed class SolutionContextService
         });
     }
 
-    public void OpenCodexSkillsDirectory()
+    public void OpenCodexSkillsDirectory(string? environmentVariables = null)
     {
-        var path = GetCodexSkillsDirectory();
+        var path = GetCodexSkillsDirectory(environmentVariables);
         Directory.CreateDirectory(path);
         OpenPath(path);
     }
@@ -555,10 +555,10 @@ public sealed class SolutionContextService
         });
     }
 
-    public string CreateSkillTemplate(string skillName, string description)
+    public string CreateSkillTemplate(string skillName, string description, string? environmentVariables = null)
     {
         var normalizedSkillName = NormalizeSkillName(skillName);
-        var skillDirectory = Path.Combine(GetCodexSkillsDirectory(), normalizedSkillName);
+        var skillDirectory = Path.Combine(GetCodexSkillsDirectory(environmentVariables), normalizedSkillName);
         Directory.CreateDirectory(skillDirectory);
 
         var skillFile = Path.Combine(skillDirectory, "SKILL.md");

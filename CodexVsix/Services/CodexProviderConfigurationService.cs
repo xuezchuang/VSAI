@@ -36,11 +36,14 @@ public static class CodexProviderConfigurationService
             throw new ArgumentException("Base URL 须为 HTTP 或 HTTPS 地址，不能包含账号、密码、查询参数或片段。");
         }
 
-        if (provider.Models is null || provider.Models.Count == 0 || provider.Models.Count > 50
+        if (provider.Models is null || (provider.Catalog is null && provider.Models.Count == 0)
+            || provider.Models.Count > (provider.Catalog is null ? 50 : 1000)
             || provider.Models.Any(model => !IsValidText(model, 200)))
         {
-            throw new ArgumentException("Provider must list 1 to 50 models, each with 1 to 200 characters and no control characters.");
+            throw new ArgumentException("服务模型 ID 须为 1 到 200 个字符；自动目录最多支持 1000 个模型。");
         }
+
+        if (provider.Catalog is not null) CodexProviderCatalogConfigurationService.ValidateCatalog(provider.Catalog);
 
         if (provider.ContextWindows is not null && provider.ContextWindows.Values.Any(value => value <= 0))
         {

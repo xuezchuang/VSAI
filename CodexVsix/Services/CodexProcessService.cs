@@ -53,6 +53,7 @@ public sealed class CodexProcessService : IDisposable
         localization => localization.IdeContextOpenFilesLabel,
         localization => localization.IdeContextSelectionLabel);
 
+    internal static readonly CodexProviderDiscoveryService ProviderDiscovery = new();
     private readonly SemaphoreSlim _executionGate = new(1, 1);
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly SemaphoreSlim _providerGate = new(1, 1);
@@ -63,6 +64,7 @@ public sealed class CodexProcessService : IDisposable
     private readonly object _writeLock = new();
     private readonly Dictionary<long, PendingRequest> _pendingRequests = new();
     private readonly Dictionary<string, string> _skillsByName = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _migrationAttemptedHomes = new(StringComparer.OrdinalIgnoreCase);
     private readonly CodexDiagnosticLogger _diagnostics;
 
     private Process? _serverProcess;
@@ -72,6 +74,7 @@ public sealed class CodexProcessService : IDisposable
     private string? _threadId;
     private string? _threadConfigKey;
     private string? _serverConfigKey;
+    private string? _serverModelCatalogKey;
     private string? _skillsCacheKey;
     private string? _languageOverride;
     private bool _threadLoaded;
@@ -87,7 +90,10 @@ public sealed class CodexProcessService : IDisposable
     public event Action<CodexRateLimitSummary>? RateLimitsUpdated;
     public event Action? AccountUpdated;
     internal event Action? ProvidersChanged;
+    internal IReadOnlyList<string> ProviderCatalogRuntimeWarnings { get; private set; } = Array.Empty<string>();
+    internal string SessionMigrationError { get; private set; } = string.Empty;
     internal bool HasActiveProviderWork => _providerRouter.IsBusy || _activeTurn is not null;
+    internal string? PendingOfficialLoginId => _providerRouter.PendingLoginId;
 
     public CodexProcessService()
         : this(CodexDiagnosticLogger.Shared)
@@ -133,7 +139,7 @@ public sealed class CodexProcessService : IDisposable
 
     private Task<JToken?> InvokeProviderRequestAsync(CodexExtensionSettings settings, string method, JToken? parameters, CancellationToken token)
         => _providerRouter.InvokeAsync(settings, method, parameters,
-            (rpcMethod, values, ct) => SendRequestAsync(rpcMethod, values, ct),
+            (rpcMethod, values, ct) => SendRequestAsync(rpcMethod, CodexSessionStorage.PrepareRequest(settings, rpcMethod, values), ct),
             async ct =>
             {
                 await _lifecycleGate.WaitAsync(ct).ConfigureAwait(false);
@@ -516,11 +522,12 @@ public sealed class CodexProcessService : IDisposable
         }
 
         var summary = ParseThreadSummary(thread, threadId) ?? new CodexThreadSummary { ThreadId = threadId };
-        var sessionPath = thread["path"]?.Value<string>() ?? FindSessionPathForThread(summary.ThreadId);
+        var codexHome = CodexEnvironmentPathHelper.GetCodexHomeDirectory(settings.EnvironmentVariables);
+        var sessionPath = ResolvePrivateSessionPath(thread["path"]?.Value<string>(), summary.ThreadId, codexHome);
         return new CodexThreadConversation
         {
             Thread = summary,
-            Messages = ParseThreadMessages(thread, summary.ThreadId, sessionPath)
+            Messages = ParseThreadMessages(thread, summary.ThreadId, sessionPath, codexHome)
         };
     }
 
@@ -1001,18 +1008,45 @@ public sealed class CodexProcessService : IDisposable
         {
             _languageOverride = settings.LanguageOverride;
             _providerSettings = settings;
+            await Task.Run(() => CodexSessionStorage.Prepare(settings.EnvironmentVariables), cancellationToken).ConfigureAwait(false);
             var desiredServerConfig = BuildServerConfigKey(settings);
+            CodexProviderModelCatalogRuntime.ModelCatalogSnapshot? catalogSnapshot = null;
             Task? initializedTask = null;
             var isReady = false;
+            var hasMatchingServer = false;
 
             lock (_syncRoot)
             {
-                isReady = _serverProcess is not null
+                hasMatchingServer = _serverProcess is not null
                     && !_serverProcess.HasExited
                     && string.Equals(_serverConfigKey, desiredServerConfig, StringComparison.Ordinal);
-                if (isReady)
+                if (hasMatchingServer)
                 {
                     initializedTask = _initializedTcs?.Task;
+                    // A shared CLI catalog refresh must not interrupt a turn, approval,
+                    // or pending request. Recheck it on the next idle request instead.
+                    isReady = _activeTurn is not null || _providerRouter.IsBusy || _pendingRequests.Count > 0;
+                }
+            }
+
+            if (!isReady)
+            {
+                try
+                {
+                    catalogSnapshot = CodexProviderModelCatalogRuntime.ReadSnapshot(settings);
+                    ProviderCatalogRuntimeWarnings = CodexProviderModelCatalogRuntime.GetRuntimeWarnings(settings, catalogSnapshot);
+                    isReady = hasMatchingServer && string.Equals(_serverModelCatalogKey,
+                        catalogSnapshot?.Key ?? string.Empty, StringComparison.Ordinal);
+                }
+                catch (Exception ex) when (hasMatchingServer && (ex is IOException
+                    || ex is UnauthorizedAccessException || ex is Newtonsoft.Json.JsonException
+                    || ex is InvalidOperationException))
+                {
+                    // Codex writes models_cache.json in place. Keep the working server
+                    // if that file is temporarily missing or incomplete during refresh.
+                    isReady = true;
+                    _diagnostics.Write("appserver.model-catalog.refresh-deferred",
+                        new JObject { ["errorType"] = ex.GetType().FullName });
                 }
             }
 
@@ -1026,6 +1060,8 @@ public sealed class CodexProcessService : IDisposable
                 return;
             }
 
+            // Generate from the exact snapshot whose key will identify this process.
+            var modelCatalogPath = CodexProviderModelCatalogRuntime.PrepareFromSnapshot(settings, catalogSnapshot);
             if (_serverProcess is not null && !_serverProcess.HasExited)
             {
                 ThrowIfProviderChangeUnsafe();
@@ -1035,14 +1071,16 @@ public sealed class CodexProcessService : IDisposable
             lock (_syncRoot)
             {
                 _serverConfigKey = desiredServerConfig;
+                _serverModelCatalogKey = catalogSnapshot?.Key ?? string.Empty;
                 _initializedTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 _lastServerError = string.Empty;
             }
 
             try
             {
-                StartServerProcess(settings, workingDirectory);
+                StartServerProcess(settings, workingDirectory, modelCatalogPath);
                 await InitializeServerAsync(cancellationToken).ConfigureAwait(false);
+                await MigrateSessionStorageAsync(settings, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -1067,6 +1105,43 @@ public sealed class CodexProcessService : IDisposable
         {
             _lifecycleGate.Release();
         }
+    }
+
+    private async Task MigrateSessionStorageAsync(CodexExtensionSettings settings, CancellationToken cancellationToken)
+    {
+        var privateHome = CodexEnvironmentPathHelper.GetCodexHomeDirectory(settings.EnvironmentVariables);
+        var sharedHome = CodexEnvironmentPathHelper.GetSharedCodexHomeDirectory(settings.EnvironmentVariables);
+        // One attempt per service/home. A partial migration must not turn every
+        // history request into another retry loop; the next VS session retries it.
+        if (!_migrationAttemptedHomes.Add(privateHome)) return;
+        SessionMigrationError = string.Empty;
+        try
+        {
+            using var lease = await CodexSessionStorage.AcquireMigrationLeaseAsync(privateHome, cancellationToken).ConfigureAwait(false);
+            if (CodexSessionMigration.HasCompletedMigration(sharedHome, privateHome)) return;
+            using var source = new CodexMigrationSourceClient(settings);
+            await source.InitializeAsync(cancellationToken).ConfigureAwait(false);
+            var completed = await CodexSessionMigration.MigrateAsync(sharedHome, privateHome, source.SendAsync,
+                (method, parameters, token) => SendRequestAsync(method,
+                    CodexSessionStorage.PrepareRequest(settings, method, parameters), token), cancellationToken).ConfigureAwait(false);
+            if (completed) return;
+        }
+        catch (OperationCanceledException)
+        {
+            _migrationAttemptedHomes.Remove(privateHome);
+            throw;
+        }
+        catch (Exception exception)
+        {
+            SessionMigrationError = CodexDiagnosticLogger.SanitizeText(RedactProviderSecrets(exception.Message));
+            _diagnostics.Write("appserver.session-migration.deferred", new JObject { ["errorType"] = exception.GetType().FullName });
+        }
+        AppServerNotificationReceived?.Invoke("warning", new JObject
+        {
+            ["message"] = "部分旧会话尚未迁移，原记录已保留。VSAI 独立会话库可继续使用；关闭旧会话后重启 VS 会重试。迁移详情："
+                + Path.Combine(privateHome, "session-migration-manifest.json")
+                + (string.IsNullOrEmpty(SessionMigrationError) ? string.Empty : Environment.NewLine + SessionMigrationError)
+        });
     }
 
     private async Task InitializeServerAsync(CancellationToken cancellationToken)
@@ -1186,7 +1261,7 @@ public sealed class CodexProcessService : IDisposable
         }
     }
 
-    private void StartServerProcess(CodexExtensionSettings settings, string workingDirectory)
+    private void StartServerProcess(CodexExtensionSettings settings, string workingDirectory, string? modelCatalogPath)
     {
         var executablePath = CodexExecutableResolver.ResolveExecutableLocation(settings.CodexExecutablePath, settings.EnvironmentVariables);
         if (string.IsNullOrWhiteSpace(executablePath))
@@ -1194,7 +1269,7 @@ public sealed class CodexProcessService : IDisposable
             executablePath = CodexExecutableResolver.NormalizeConfiguredExecutablePath(settings.CodexExecutablePath);
         }
 
-        var arguments = BuildServerArguments(settings);
+        var arguments = CodexAppServerCommandLine.Build(settings, modelCatalogPath);
         var startInfo = BuildStartInfo(executablePath, arguments, workingDirectory);
 
         var psi = new ProcessStartInfo
@@ -1212,6 +1287,7 @@ public sealed class CodexProcessService : IDisposable
         };
 
         ApplyEnvironmentVariables(psi, settings.EnvironmentVariables);
+        CodexSessionStorage.ApplyEnvironment(psi, settings.EnvironmentVariables);
         foreach (var provider in settings.Providers)
         {
             CodexProviderConfigurationService.ApplyEnvironment(psi, provider);
@@ -1348,7 +1424,7 @@ public sealed class CodexProcessService : IDisposable
         JToken parsedMessage;
         try
         {
-            parsedMessage = JToken.Parse(rawMessage);
+            parsedMessage = NewtonsoftJsonCompatibility.ParseProtocolValue(rawMessage);
         }
         catch
         {
@@ -3880,16 +3956,16 @@ public sealed class CodexProcessService : IDisposable
         return threadObject;
     }
 
-    private static IReadOnlyList<ChatMessage> ParseThreadMessages(JToken thread, string? threadId, string? sessionPath)
+    private static IReadOnlyList<ChatMessage> ParseThreadMessages(JToken thread, string? threadId, string? sessionPath, string? codexHome = null)
     {
         var messages = new List<ChatMessage>();
         var turns = thread["turns"] as JArray;
         if (turns is null)
         {
-            return ReadMessagesFromSession(sessionPath);
+            return ReadMessagesFromSession(sessionPath, codexHome);
         }
 
-        var fallbackPrompts = ReadPromptHistoryForThread(threadId);
+        var fallbackPrompts = ReadPromptHistoryForThread(threadId, codexHome);
         var fallbackPromptIndex = 0;
 
         foreach (var turn in turns)
@@ -3923,12 +3999,13 @@ public sealed class CodexProcessService : IDisposable
             messages.AddRange(turnMessages);
         }
 
-        return messages.Count > 0 ? messages : ReadMessagesFromSession(sessionPath);
+        return messages.Count > 0 ? messages : ReadMessagesFromSession(sessionPath, codexHome);
     }
 
-    private static IReadOnlyList<ChatMessage> ReadMessagesFromSession(string? sessionPath)
+    private static IReadOnlyList<ChatMessage> ReadMessagesFromSession(string? sessionPath, string? codexHome)
     {
-        if (string.IsNullOrWhiteSpace(sessionPath) || !File.Exists(sessionPath))
+        var privatePath = TryGetPrivateSessionPath(sessionPath, codexHome);
+        if (privatePath is null || !File.Exists(privatePath))
         {
             return Array.Empty<ChatMessage>();
         }
@@ -3937,7 +4014,7 @@ public sealed class CodexProcessService : IDisposable
         var eventMessages = new List<ChatMessage>();
         try
         {
-            foreach (var line in ReadRecentNonEmptyLines(sessionPath!, MaxSessionLinesToParse))
+            foreach (var line in ReadRecentNonEmptyLines(privatePath, MaxSessionLinesToParse))
             {
                 JObject entry;
                 try
@@ -3968,6 +4045,148 @@ public sealed class CodexProcessService : IDisposable
         }
 
         return responseMessages.Count > 0 ? responseMessages : eventMessages;
+    }
+
+    /// <summary>
+    /// Resolves a rollout path supplied by the app server without allowing an old
+    /// desktop path to become a fallback read.  A private cache search remains for
+    /// older app-server responses that omitted or retained a stale path.
+    /// </summary>
+    internal static string? ResolvePrivateSessionPath(string? reportedPath, string? threadId, string privateHome)
+    {
+        var path = TryGetPrivateSessionPath(reportedPath, privateHome);
+        if (path is not null)
+        {
+            return path;
+        }
+
+        path = TryGetPrivateSessionPath(FindSessionPathForThread(threadId, privateHome), privateHome);
+        if (path is not null)
+        {
+            return path;
+        }
+
+        if (!string.IsNullOrWhiteSpace(reportedPath))
+        {
+            throw new InvalidOperationException(
+                "App-server returned a session path outside VSAI's private session storage. "
+                + "The shared desktop rollout was not read; retry after migration completes.");
+        }
+
+        return null;
+    }
+
+    private static string? TryGetPrivateSessionPath(string? path, string? privateHome)
+    {
+        if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(privateHome))
+        {
+            return null;
+        }
+
+        try
+        {
+            var candidate = NormalizeWin32SessionPath(path!);
+            var root = NormalizeWin32SessionPath(privateHome!);
+            if (!Path.IsPathRooted(candidate) || !Path.IsPathRooted(root))
+            {
+                return null;
+            }
+
+            candidate = Path.GetFullPath(candidate);
+            root = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (!IsPathInsideDirectory(candidate, root) || HasReparsePointInPath(root, candidate))
+            {
+                return null;
+            }
+
+            return candidate;
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+        catch (NotSupportedException)
+        {
+            return null;
+        }
+        catch (PathTooLongException)
+        {
+            return null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    private static string NormalizeWin32SessionPath(string path)
+    {
+        const string extendedPrefix = @"\\?\";
+        const string extendedUncPrefix = @"\\?\UNC\";
+        var value = path.Trim();
+        if (value.StartsWith(extendedUncPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return @"\\" + value.Substring(extendedUncPrefix.Length);
+        }
+
+        if (!value.StartsWith(extendedPrefix, StringComparison.Ordinal))
+        {
+            return value;
+        }
+
+        var drivePath = value.Substring(extendedPrefix.Length);
+        if (drivePath.Length >= 3
+            && char.IsLetter(drivePath[0])
+            && drivePath[1] == ':'
+            && (drivePath[2] == Path.DirectorySeparatorChar || drivePath[2] == Path.AltDirectorySeparatorChar))
+        {
+            return drivePath;
+        }
+
+        throw new ArgumentException("Only Win32 extended drive or UNC session paths are supported.", nameof(path));
+    }
+
+    private static bool IsPathInsideDirectory(string path, string directory)
+    {
+        var prefix = directory.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal)
+            ? directory
+            : directory + Path.DirectorySeparatorChar;
+        return path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool HasReparsePointInPath(string root, string path)
+    {
+        if (HasReparsePoint(root))
+        {
+            return true;
+        }
+
+        var relative = path.Substring(root.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var current = root;
+        foreach (var segment in relative.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            if (HasReparsePoint(current))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasReparsePoint(string path)
+    {
+        if (!File.Exists(path) && !Directory.Exists(path))
+        {
+            return false;
+        }
+
+        return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
     }
 
     private static IReadOnlyList<string> ReadRecentNonEmptyLines(string path, int maxLines)
@@ -4032,17 +4251,14 @@ public sealed class CodexProcessService : IDisposable
         }
     }
 
-    private static string? FindSessionPathForThread(string? threadId)
+    private static string? FindSessionPathForThread(string? threadId, string? codexHome = null)
     {
         if (string.IsNullOrWhiteSpace(threadId))
         {
             return null;
         }
 
-        var sessionsRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".codex",
-            "sessions");
+        var sessionsRoot = Path.Combine(codexHome ?? CodexEnvironmentPathHelper.GetCodexHomeDirectory(), "sessions");
 
         if (!Directory.Exists(sessionsRoot))
         {
@@ -4051,8 +4267,7 @@ public sealed class CodexProcessService : IDisposable
 
         try
         {
-            return Directory.EnumerateFiles(sessionsRoot, "*.jsonl", SearchOption.AllDirectories)
-                .FirstOrDefault(path => Path.GetFileNameWithoutExtension(path).IndexOf(threadId, StringComparison.OrdinalIgnoreCase) >= 0);
+            return FindSessionPathInPrivateDirectory(sessionsRoot, threadId!);
         }
         catch
         {
@@ -4060,17 +4275,41 @@ public sealed class CodexProcessService : IDisposable
         }
     }
 
-    private static IReadOnlyList<string> ReadPromptHistoryForThread(string? threadId)
+    private static string? FindSessionPathInPrivateDirectory(string directory, string threadId)
+    {
+        if (HasReparsePoint(directory))
+        {
+            return null;
+        }
+
+        foreach (var path in Directory.EnumerateFiles(directory, "*.jsonl", SearchOption.TopDirectoryOnly))
+        {
+            if (Path.GetFileNameWithoutExtension(path).IndexOf(threadId, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return path;
+            }
+        }
+
+        foreach (var child in Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly))
+        {
+            var match = FindSessionPathInPrivateDirectory(child, threadId);
+            if (match is not null)
+            {
+                return match;
+            }
+        }
+
+        return null;
+    }
+
+    private static IReadOnlyList<string> ReadPromptHistoryForThread(string? threadId, string? codexHome = null)
     {
         if (string.IsNullOrWhiteSpace(threadId))
         {
             return Array.Empty<string>();
         }
 
-        var historyPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".codex",
-            "history.jsonl");
+        var historyPath = Path.Combine(codexHome ?? CodexEnvironmentPathHelper.GetCodexHomeDirectory(), "history.jsonl");
 
         if (!File.Exists(historyPath))
         {
@@ -4878,6 +5117,7 @@ public sealed class CodexProcessService : IDisposable
             if (clearConfig)
             {
                 _serverConfigKey = null;
+                _serverModelCatalogKey = null;
             }
             _providerRouter.ServerStopped();
         }
@@ -5366,11 +5606,6 @@ public sealed class CodexProcessService : IDisposable
         return JValue.CreateString(string.Equals(method, "item/fileChange/requestApproval", StringComparison.Ordinal) ? "decline" : "cancel");
     }
 
-    private static string BuildServerArguments(CodexExtensionSettings settings)
-    {
-        return CodexAppServerCommandLine.Build(settings, CodexProviderModelCatalogRuntime.Prepare(settings));
-    }
-
     private static string BuildServerConfigKey(CodexExtensionSettings settings)
     {
         var resolvedExecutablePath = CodexExecutableResolver.ResolveExecutableLocation(settings.CodexExecutablePath, settings.EnvironmentVariables);
@@ -5379,10 +5614,15 @@ public sealed class CodexProcessService : IDisposable
             string.IsNullOrWhiteSpace(resolvedExecutablePath)
                 ? CodexExecutableResolver.NormalizeConfiguredExecutablePath(settings.CodexExecutablePath)
                 : resolvedExecutablePath,
+            CodexExecutableResolver.GetExecutableUpdateFingerprint(
+                string.IsNullOrWhiteSpace(resolvedExecutablePath)
+                    ? CodexExecutableResolver.NormalizeConfiguredExecutablePath(settings.CodexExecutablePath)
+                    : resolvedExecutablePath),
             settings.Profile ?? string.Empty,
             string.Join("\n", CodexAppServerCommandLine.BuildConfigOverrides(settings)),
             settings.AdditionalArguments ?? string.Empty,
             settings.EnvironmentVariables ?? string.Empty,
+            CodexEnvironmentPathHelper.GetCodexHomeDirectory(settings.EnvironmentVariables),
             CodexProviderModelCatalogRuntime.GetSettingsKey(settings),
             string.Join("\n", settings.Providers.Select(provider => provider.Id + "\0" + provider.ApiKey))
         });

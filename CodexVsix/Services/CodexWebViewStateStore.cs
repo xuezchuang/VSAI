@@ -15,7 +15,7 @@ internal sealed class CodexWebViewStateStore
     public CodexWebViewStateStore()
         : this(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VSAI", "official-webview-state.json"))
+            "VSAI", "official-webview-state.private-v1.json"))
     {
     }
 

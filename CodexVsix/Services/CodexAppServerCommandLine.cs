@@ -13,7 +13,7 @@ namespace CodexVsix.Services;
 /// </summary>
 internal static class CodexAppServerCommandLine
 {
-    internal static string Build(CodexExtensionSettings settings, string? modelCatalogPath = null)
+    internal static string Build(CodexExtensionSettings settings, string? modelCatalogPath = null, bool migrationSource = false)
     {
         if (settings is null)
         {
@@ -48,6 +48,12 @@ internal static class CodexAppServerCommandLine
         {
             args.Add("-c");
             args.Add("model_catalog_json=" + EncodeTomlString(modelCatalogPath!));
+        }
+        // Storage ownership wins over profile/raw/extra CLI overrides.
+        foreach (var value in CodexSessionStorage.BuildConfigOverrides(settings, migrationSource))
+        {
+            args.Add("-c");
+            args.Add(value);
         }
         return JoinArguments(args);
     }

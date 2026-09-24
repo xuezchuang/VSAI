@@ -236,6 +236,60 @@ internal static class CodexExecutableResolver
             || configuredPath.Contains("/");
     }
 
+    public static string GetExecutableUpdateFingerprint(string executablePath)
+    {
+        var fingerprint = new List<string> { GetFileFingerprint(executablePath) };
+        if (!IsWindows()) return string.Join("\n", fingerprint);
+
+        var extension = Path.GetExtension(executablePath);
+        if (!string.Equals(extension, ".cmd", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(extension, ".bat", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(extension, ".ps1", StringComparison.OrdinalIgnoreCase))
+            return string.Join("\n", fingerprint);
+
+        var wrapperDirectory = Path.GetDirectoryName(Path.GetFullPath(executablePath));
+        if (string.IsNullOrWhiteSpace(wrapperDirectory)) return string.Join("\n", fingerprint);
+        var packageRoot = Path.Combine(wrapperDirectory, "node_modules", "@openai", "codex");
+        if (!Directory.Exists(packageRoot)
+            && string.Equals(Path.GetFileName(wrapperDirectory), ".bin", StringComparison.OrdinalIgnoreCase))
+        {
+            var modulesDirectory = Directory.GetParent(wrapperDirectory);
+            var workspaceDirectory = modulesDirectory?.Parent;
+            if (workspaceDirectory is not null)
+                packageRoot = Path.Combine(workspaceDirectory.FullName, "node_modules", "@openai", "codex");
+        }
+
+        fingerprint.Add(GetFileFingerprint(Path.Combine(packageRoot, "package.json")));
+        fingerprint.Add(GetFileFingerprint(Path.Combine(packageRoot, "bin", "codex.js")));
+        foreach (var platformPackage in new[]
+        {
+            new { Name = "codex-win32-x64", Target = "x86_64-pc-windows-msvc" },
+            new { Name = "codex-win32-arm64", Target = "aarch64-pc-windows-msvc" }
+        })
+        {
+            var platformRoot = Path.Combine(packageRoot, "node_modules", "@openai", platformPackage.Name);
+            fingerprint.Add(GetFileFingerprint(Path.Combine(platformRoot, "package.json")));
+            fingerprint.Add(GetFileFingerprint(Path.Combine(platformRoot, "vendor", platformPackage.Target, "bin", "codex.exe")));
+        }
+
+        return string.Join("\n", fingerprint);
+    }
+
+    private static string GetFileFingerprint(string path)
+    {
+        try
+        {
+            var file = new FileInfo(path);
+            return file.Exists
+                ? file.FullName + "|" + file.Length + "|" + file.LastWriteTimeUtc.Ticks
+                : path + "|missing";
+        }
+        catch
+        {
+            return path + "|unavailable";
+        }
+    }
+
     private static void ApplyEnvironmentVariables(ProcessStartInfo psi, string? environmentVariables)
     {
         foreach (var entry in CodexEnvironmentPathHelper.ParseEnvironmentVariables(environmentVariables))

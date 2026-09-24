@@ -125,6 +125,27 @@ public sealed class ExtensionSettingsStore
         }
     }
 
+    // Provider edits and discovery merge under the same cross-instance mutex as ordinary saves.
+    // A discovery reply must never replace a newer key, local override, or another service.
+    internal bool UpdateProviderCatalogs(CodexExtensionSettings settings, Func<CodexExtensionSettings, bool> update)
+    {
+        Directory.CreateDirectory(_settingsDirectory);
+        using var mutex = new Mutex(false, _settingsMutexName);
+        if (!WaitForMutex(mutex)) throw new IOException("Timed out while waiting to save provider settings.");
+        try
+        {
+            var latest = File.Exists(_settingsFile)
+                ? LoadWithoutLock()
+                : JsonConvert.DeserializeObject<CodexExtensionSettings>(JsonConvert.SerializeObject(settings))!;
+            var changed = update(latest);
+            if (changed) WriteAtomically(SerializeForStorage(latest));
+            settings.Providers = latest.Providers;
+            settings.DefaultModel = latest.DefaultModel;
+            return changed;
+        }
+        finally { mutex.ReleaseMutex(); }
+    }
+
     private CodexExtensionSettings LoadWithoutLock()
     {
         if (!File.Exists(_settingsFile))
@@ -268,6 +289,8 @@ public sealed class ExtensionSettingsStore
             provider.BaseUrl ??= string.Empty;
             provider.ApiKey ??= string.Empty;
             provider.Models ??= new List<string>();
+            if (provider.Catalog is not null)
+                CodexProviderCatalogConfigurationService.ApplyEffectiveProperties(provider);
         }
         settings.CustomReasoningEfforts ??= new List<string>();
         settings.CustomVerbosityOptions ??= new List<string>();

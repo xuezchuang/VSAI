@@ -137,7 +137,10 @@ public sealed class CodexProviderSessionRouterTests
             [property] = new JArray(new JObject { ["id"] = "shared-model", ["model"] = "shared-model", ["isDefault"] = true }),
             ["nextCursor"] = "page-two"
         };
-        harness.Response = (_, __) => original;
+        harness.Response = (method, _) => method == "account/read"
+            ? new JObject { ["account"] = new JObject { ["type"] = "chatgpt" } }
+            : original;
+        await harness.Invoke("account/read", new JObject());
 
         var result = await harness.Invoke("model/list", new JObject());
 
@@ -157,21 +160,119 @@ public sealed class CodexProviderSessionRouterTests
         Assert.Single(Assert.IsType<JArray>(nextPage?[property]));
     }
 
-    [Fact]
-    public async Task NoAccountRemainsNullWhileManagedProviderRemovesOfficialAuthGate()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("apiKey")]
+    public async Task NonChatGptAccountsKeepOfficialChoicesAndPaginationAlongsideManagedProviders(string? accountType)
     {
         var harness = new Harness();
-        var account = new JObject { ["account"] = null, ["requiresOpenaiAuth"] = true };
-        harness.Response = (method, _) => method == "account/read" ? account : new JObject { ["data"] = new JArray() };
+        var account = new JObject
+        {
+            ["account"] = accountType is null ? null : new JObject { ["type"] = accountType },
+            ["requiresOpenaiAuth"] = true
+        };
+        var originalModels = new JObject
+        {
+            ["data"] = new JArray(new JObject { ["model"] = "official-model", ["id"] = "official-model", ["isDefault"] = true }),
+            ["nextCursor"] = "page-two"
+        };
+        harness.Response = (method, _) => method == "account/read" ? account : originalModels;
 
         var result = await harness.Invoke("account/read", new JObject());
 
-        Assert.Equal(JTokenType.Null, result?["account"]?.Type);
+        Assert.True(JToken.DeepEquals(account["account"], result?["account"]));
         Assert.False(result?["requiresOpenaiAuth"]?.Value<bool>());
         Assert.True(account["requiresOpenaiAuth"]?.Value<bool>());
         var list = await harness.Invoke("model/list", new JObject());
-        Assert.True(list?["data"]?[0]?["isDefault"]?.Value<bool>());
-        Assert.Equal(harness.Alias, list?["data"]?[0]?["model"]?.Value<string>());
+        Assert.Equal(2, Assert.IsType<JArray>(list?["data"]).Count);
+        Assert.Equal("official-model", list?["data"]?[0]?["model"]?.Value<string>());
+        Assert.True(list?["data"]?[1]?["isDefault"]?.Value<bool>());
+        Assert.Equal(harness.Alias, list?["data"]?[1]?["model"]?.Value<string>());
+        Assert.Equal("page-two", list?["nextCursor"]?.Value<string>());
+        Assert.Equal("official-model", originalModels["data"]?[0]?["model"]?.Value<string>());
+        var nextPage = await harness.Invoke("model/list", new JObject { ["cursor"] = "page-two" });
+        Assert.Single(Assert.IsType<JArray>(nextPage?["data"]));
+        Assert.Equal("official-model", nextPage?["data"]?[0]?["model"]?.Value<string>());
+    }
+
+    [Fact]
+    public async Task ModelListBeforeAccountReadStillIncludesOfficialChoices()
+    {
+        var harness = new Harness();
+        harness.Response = (_, __) => new JObject { ["data"] = new JArray(new JObject { ["model"] = "official-model" }) };
+        var list = await harness.Invoke("model/list", new JObject());
+        Assert.Contains(list!["data"]!, model => model["model"]?.Value<string>() == "official-model");
+        Assert.Contains(list["data"]!, model => model["model"]?.Value<string>() == harness.Alias);
+    }
+
+    [Fact]
+    public async Task OfficialLoginProtectsOwningServerUntilCompletedOrCancelled()
+    {
+        var harness = new Harness();
+        harness.Response = (method, _) => method == "account/login/start"
+            ? new JObject { ["type"] = "chatgpt", ["loginId"] = "synthetic-login" } : new JObject();
+        await harness.Invoke("account/login/start", new JObject { ["type"] = "chatgpt" });
+        Assert.True(harness.Router.IsBusy);
+        Assert.Equal("synthetic-login", harness.Router.PendingLoginId);
+        harness.Router.ObserveNotification("account/login/completed", new JObject { ["loginId"] = "different-login", ["success"] = true });
+        Assert.True(harness.Router.IsBusy);
+        harness.Router.ObserveNotification("account/login/completed", new JObject { ["loginId"] = "synthetic-login", ["success"] = true });
+        Assert.False(harness.Router.IsBusy);
+        Assert.Null(harness.Router.PendingLoginId);
+        harness.Router.ServerStopped();
+        await harness.Invoke("account/login/start", new JObject { ["type"] = "chatgpt" });
+        await harness.Invoke("account/login/cancel", new JObject { ["loginId"] = "synthetic-login" });
+        Assert.False(harness.Router.IsBusy);
+    }
+
+    [Fact]
+    public async Task LoginCompletionBeforeStartResponseDoesNotLeavePhantomBusyState()
+    {
+        var harness = new Harness();
+        harness.Response = (_, __) =>
+        {
+            harness.Router.ObserveNotification("account/login/completed", new JObject { ["loginId"] = "synthetic-login", ["success"] = true });
+            return new JObject { ["type"] = "chatgpt", ["loginId"] = "synthetic-login" };
+        };
+        await harness.Invoke("account/login/start", new JObject { ["type"] = "chatgpt" });
+        Assert.False(harness.Router.IsBusy);
+        Assert.Null(harness.Router.PendingLoginId);
+    }
+
+    [Fact]
+    public async Task UnidentifiedLoginCompletionClearsPendingLogin()
+    {
+        var harness = new Harness();
+        harness.Response = (_, __) => new JObject { ["type"] = "chatgpt", ["loginId"] = "synthetic-login" };
+        await harness.Invoke("account/login/start", new JObject { ["type"] = "chatgpt" });
+        Assert.True(harness.Router.IsBusy);
+        harness.Router.ObserveNotification("account/login/completed", new JObject { ["loginId"] = null, ["success"] = false });
+        Assert.False(harness.Router.IsBusy);
+        Assert.Null(harness.Router.PendingLoginId);
+    }
+
+    [Fact]
+    public async Task SecondLoginCannotReplacePendingLogin()
+    {
+        var harness = new Harness();
+        harness.Response = (_, __) => new JObject { ["type"] = "chatgpt", ["loginId"] = "synthetic-login" };
+        await harness.Invoke("account/login/start", new JObject { ["type"] = "chatgpt" });
+        await Assert.ThrowsAsync<InvalidOperationException>(() => harness.Invoke("account/login/start", new JObject { ["type"] = "chatgpt" }));
+        Assert.Single(harness.Requests);
+        Assert.Equal("synthetic-login", harness.Router.PendingLoginId);
+    }
+
+    [Fact]
+    public async Task AccountUpdateImmediatelyRestoresOfficialDefaultWithoutWaitingForRead()
+    {
+        var harness = new Harness();
+        harness.Router.ObserveNotification("account/updated", new JObject { ["authMode"] = "chatgpt" });
+        harness.Response = (_, __) => new JObject { ["data"] = new JArray(new JObject { ["model"] = "official-model", ["isDefault"] = true }) };
+        var list = await harness.Invoke("model/list", new JObject());
+        Assert.True(list!["data"]![0]!["isDefault"]!.Value<bool>());
+        harness.Router.ServerStopped();
+        list = await harness.Invoke("model/list", new JObject());
+        Assert.True(list!["data"]![1]!["isDefault"]!.Value<bool>());
     }
 
     [Fact]
@@ -322,6 +423,42 @@ public sealed class CodexProviderSessionRouterTests
         await harness.Invoke(method, request);
 
         Assert.DoesNotContain(harness.Alias, harness.Requests.Last().Values.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OmittedForkInheritsSourceProviderAndModelThenVerifiesTheNewThread()
+    {
+        var harness = new Harness();
+        await harness.Invoke("thread/start", new JObject { ["model"] = harness.Alias });
+        harness.Response = (method, values) =>
+        {
+            var response = harness.DefaultResponse(method, values);
+            if (method == "thread/fork")
+            {
+                response!["model"] = "official-model";
+                response["modelProvider"] = "openai";
+            }
+            return response;
+        };
+        var request = new JObject { ["threadId"] = "same-thread" };
+
+        var result = await harness.Invoke("thread/fork", request);
+
+        var fork = Assert.Single(harness.Requests, sent => sent.Method == "thread/fork").Values;
+        Assert.Equal("shared-model", fork["model"]?.Value<string>());
+        Assert.Equal(harness.ProviderId, fork["modelProvider"]?.Value<string>());
+        Assert.Equal(1, harness.Restarts);
+        var resumes = harness.Requests.Where(sent => sent.Method == "thread/resume"
+            && sent.Values["threadId"]?.Value<string>() == "forked-thread").Select(sent => sent.Values).ToArray();
+        Assert.Equal(2, resumes.Length);
+        Assert.All(resumes, resume =>
+        {
+            Assert.Equal("shared-model", resume["model"]?.Value<string>());
+            Assert.Equal(harness.ProviderId, resume["modelProvider"]?.Value<string>());
+        });
+        Assert.Equal("forked-thread", result?["thread"]?["id"]?.Value<string>());
+        Assert.Equal(harness.Alias, result?["model"]?.Value<string>());
+        Assert.True(JToken.DeepEquals(request, new JObject { ["threadId"] = "same-thread" }));
     }
 
     [Theory]
@@ -667,6 +804,59 @@ public sealed class CodexProviderSessionRouterTests
         Assert.Equal("config/read", Assert.Single(harness.Requests).Method);
     }
 
+    [Fact]
+    public async Task CatalogUnknownReasoningDoesNotForwardStaleGlobalEffort()
+    {
+        var harness = new Harness();
+        var provider = harness.Settings.Providers[0];
+        provider.Catalog = new() { ManualModels = new() { "shared-model" } };
+        await harness.Invoke("thread/start", new JObject { ["model"] = harness.Alias });
+        var turn = Turn(harness.Alias);
+        turn["effort"] = "max";
+        turn["collaborationMode"] = new JObject
+        {
+            ["mode"] = "default", ["settings"] = new JObject { ["model"] = harness.Alias, ["reasoning_effort"] = "max" }
+        };
+        await harness.Invoke("turn/start", turn);
+        var sent = Assert.Single(harness.Requests, request => request.Method == "turn/start").Values;
+        Assert.Null(sent["effort"]);
+        Assert.Equal(JTokenType.Null, sent["collaborationMode"]!["settings"]!["reasoning_effort"]!.Type);
+        Assert.Equal("max", turn["effort"]!.Value<string>());
+    }
+
+    [Fact]
+    public async Task CatalogEffortSelectionIsLimitedToReportedLevels()
+    {
+        var harness = new Harness();
+        var provider = harness.Settings.Providers[0];
+        provider.Catalog = new()
+        {
+            DiscoveredModels = new()
+            {
+                new() { Id = "shared-model", ReasoningEfforts = new() { "low", "max" }, DefaultReasoningEffort = "max" }
+            }
+        };
+        await harness.Invoke("thread/start", new JObject { ["model"] = harness.Alias });
+        var turn = Turn(harness.Alias);
+        turn["effort"] = "high";
+        await harness.Invoke("turn/start", turn);
+        Assert.Equal("max", Assert.Single(harness.Requests, request => request.Method == "turn/start").Values["effort"]!.Value<string>());
+    }
+
+    [Fact]
+    public async Task KnownUnsupportedImageIsRejectedBeforeSendingTurn()
+    {
+        var harness = new Harness();
+        var provider = harness.Settings.Providers[0];
+        provider.Catalog = new() { DiscoveredModels = new() { new() { Id = "shared-model", SupportsImages = false } } };
+        await harness.Invoke("thread/start", new JObject { ["model"] = harness.Alias });
+        var turn = Turn(harness.Alias);
+        turn["input"] = new JArray(new JObject { ["type"] = "localImage", ["path"] = "synthetic.png" });
+        await Assert.ThrowsAsync<InvalidOperationException>(() => harness.Invoke("turn/start", turn));
+        Assert.DoesNotContain(harness.Requests, request => request.Method == "turn/start");
+        Assert.False(harness.Router.IsBusy);
+    }
+
     private static JObject Turn(string model) => new JObject
     {
         ["threadId"] = "same-thread", ["model"] = model,
@@ -730,7 +920,7 @@ public sealed class CodexProviderSessionRouterTests
 
         internal JToken? DefaultResponse(string method, JObject values)
         {
-            var id = values["threadId"]?.Value<string>() ?? "same-thread";
+            var id = method == "thread/fork" ? "forked-thread" : values["threadId"]?.Value<string>() ?? "same-thread";
             if (method == "thread/start" || method == "thread/resume" || method == "thread/fork" || method == "thread/settings/update")
             {
                 if (!_effectiveSettings.TryGetValue(id, out var effective))

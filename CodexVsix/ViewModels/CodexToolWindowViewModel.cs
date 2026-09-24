@@ -822,11 +822,11 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
 
     public bool HasPromptDisplayText => !string.IsNullOrWhiteSpace(PromptDisplayText);
 
-    public string CodexConfigPath => _solutionContextService.GetCodexConfigPath();
+    public string CodexConfigPath => _solutionContextService.GetCodexConfigPath(Settings.EnvironmentVariables);
 
     public string ExtensionSettingsPath => _settingsStore.SettingsFilePath;
 
-    public string CodexSkillsDirectory => _solutionContextService.GetCodexSkillsDirectory();
+    public string CodexSkillsDirectory => _solutionContextService.GetCodexSkillsDirectory(Settings.EnvironmentVariables);
 
     public string SelectedSettingsSection
     {
@@ -2543,7 +2543,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         ThreadHelper.JoinableTaskFactory.Run(async delegate
         {
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-            _solutionContextService.OpenCodexConfig();
+            _solutionContextService.OpenCodexConfig(Settings.EnvironmentVariables);
         });
     }
 
@@ -2610,7 +2610,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         ThreadHelper.JoinableTaskFactory.Run(async delegate
         {
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-            _solutionContextService.OpenCodexSkillsDirectory();
+            _solutionContextService.OpenCodexSkillsDirectory(Settings.EnvironmentVariables);
         });
     }
 
@@ -2753,7 +2753,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         ThreadHelper.JoinableTaskFactory.Run(async delegate
         {
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-            _codexEnvironmentService.LaunchLoginTerminal(executablePath);
+            await _codexEnvironmentService.LaunchLoginTerminalAsync(executablePath, Settings.EnvironmentVariables);
         });
     }
 
@@ -2771,7 +2771,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
             {
                 await LogOutCoreAsync();
                 await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-                _codexEnvironmentService.LaunchLoginTerminal(executablePath);
+                await _codexEnvironmentService.LaunchLoginTerminalAsync(executablePath, Settings.EnvironmentVariables);
                 await RefreshCodexStatusAsync();
             }
             catch (Exception ex)
@@ -2807,7 +2807,7 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         {
             AppendOutput("[" + _localization.OutputTagAuth + "] app-server logout failed; using local credential cleanup: "
                 + protocolError.Message + Environment.NewLine);
-            _codexEnvironmentService.DeleteAuthFile(CodexEnvironmentStatus.AuthFilePath);
+            _codexEnvironmentService.DeleteAuthFile(Settings.EnvironmentVariables);
         }
 
         Settings.CurrentThreadId = string.Empty;
@@ -2862,7 +2862,10 @@ public sealed class CodexToolWindowViewModel : INotifyPropertyChanged, IDisposab
         try
         {
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-            var skillFile = _solutionContextService.CreateSkillTemplate(NewSkillName, NewSkillDescription);
+            var skillFile = _solutionContextService.CreateSkillTemplate(
+                NewSkillName,
+                NewSkillDescription,
+                Settings.EnvironmentVariables);
             NewSkillName = string.Empty;
             NewSkillDescription = string.Empty;
             _codexProcessService.InvalidateSkillsCache();

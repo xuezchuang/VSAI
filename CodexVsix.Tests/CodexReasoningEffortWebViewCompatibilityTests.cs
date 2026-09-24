@@ -20,7 +20,9 @@ public sealed class CodexReasoningEffortWebViewCompatibilityTests
         {
             CodexReasoningEffortWebViewCompatibility.ComposerModule,
             CodexReasoningEffortWebViewCompatibility.LabelModule,
-            CodexReasoningEffortWebViewCompatibility.SettingsModule
+            CodexReasoningEffortWebViewCompatibility.SettingsModule,
+            CodexReasoningEffortWebViewCompatibility.ModelQueriesModule,
+            CodexConversationForkWebViewCompatibility.ManagerModule
         };
         var originals = moduleNames.ToDictionary(name => name,
             name => File.ReadAllBytes(Path.Combine(root, "webview", "assets", name)));
@@ -35,7 +37,7 @@ public sealed class CodexReasoningEffortWebViewCompatibilityTests
             var preloadIndex = html.IndexOf("rel=\"modulepreload\"", StringComparison.Ordinal);
             Assert.True(preloadIndex < 0 || match.Index < preloadIndex);
             var imports = (JObject)JObject.Parse(match.Groups[1].Value)["imports"]!;
-            Assert.Equal(3, imports.Count);
+            Assert.Equal(5, imports.Count);
 
             foreach (var name in moduleNames)
             {
@@ -59,6 +61,10 @@ public sealed class CodexReasoningEffortWebViewCompatibilityTests
             Assert.Contains("case`max`:return`Max`;case`ultra`:return`Ultra`;", labels);
             var settings = File.ReadAllText(Path.Combine(output, "reasoning-compatibility-test-efforts", moduleNames[2]));
             Assert.Contains("||e===`max`||e===`ultra`)&&t.includes(e)?e:k", settings);
+            var manager = File.ReadAllText(Path.Combine(output, "reasoning-compatibility-test-efforts", moduleNames[4]));
+            Assert.Contains(CodexConversationForkWebViewCompatibility.ForkFromTurnAfter, manager);
+            Assert.DoesNotContain(CodexConversationForkWebViewCompatibility.ForkFromTurnBefore, manager);
+            Assert.Contains("lastTurnId:vsaiLastTurnId", manager);
         }
         finally
         {

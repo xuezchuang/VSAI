@@ -11,21 +11,21 @@ namespace CodexVsix.Tests;
 public sealed class CodexUserInstructionsStoreTests
 {
     [Fact]
-    public void EditorReadsAndWritesTheCliFileAndSeesExternalEdits()
+    public void EditorReadsAndWritesThePrivateFileAndSeesExternalEdits()
     {
         using var fixture = new Fixture();
-        File.WriteAllText(fixture.Path, "Desktop instructions\n", new UTF8Encoding(false));
+        File.WriteAllText(fixture.Path, "Private instructions\n", new UTF8Encoding(false));
         var read = fixture.Read();
         Assert.Equal(fixture.Path, read["path"]?.Value<string>());
-        Assert.Equal("Desktop instructions\n", read["contents"]?.Value<string>());
+        Assert.Equal("Private instructions\n", read["contents"]?.Value<string>());
         Assert.False(read["hasOverride"]?.Value<bool>());
 
         var saved = fixture.Save("Edited in VSAI\n");
         Assert.Equal(fixture.Path, saved["path"]?.Value<string>());
         Assert.Equal("Edited in VSAI\n", File.ReadAllText(fixture.Path));
-        Assert.Equal("Desktop instructions\n", File.ReadAllText(fixture.Path + ".vsai.bak"));
-        File.WriteAllText(fixture.Path, "Changed by the desktop app\n", new UTF8Encoding(false));
-        Assert.Equal("Changed by the desktop app\n", fixture.Read()["contents"]?.Value<string>());
+        Assert.Equal("Private instructions\n", File.ReadAllText(fixture.Path + ".vsai.bak"));
+        File.WriteAllText(fixture.Path, "Changed by the user\n", new UTF8Encoding(false));
+        Assert.Equal("Changed by the user\n", fixture.Read()["contents"]?.Value<string>());
     }
 
     [Theory]
@@ -116,13 +116,14 @@ public sealed class CodexUserInstructionsStoreTests
 
     private sealed class Fixture : IDisposable
     {
-        public string Directory { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "VSAI-instructions-tests", Guid.NewGuid().ToString("N"));
+        private string SharedHome { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "VSAI-instructions-tests", Guid.NewGuid().ToString("N"));
+        public string Directory => System.IO.Path.Combine(SharedHome, "vsai");
         public string Path => System.IO.Path.Combine(Directory, "AGENTS.md");
         public Fixture() => System.IO.Directory.CreateDirectory(Directory);
         public JObject Read() => Request("codex-agents-md", new JObject { ["hostId"] = "local" });
         public JObject Save(string contents) => Request("codex-agents-md-save", new JObject { ["hostId"] = "local", ["contents"] = contents });
         public JObject Request(string method, JObject values)
-            => CodexUserInstructionsStore.HandleRequest(method, values, "CODEX_HOME=" + Directory);
-        public void Dispose() => System.IO.Directory.Delete(Directory, recursive: true);
+            => CodexUserInstructionsStore.HandleRequest(method, values, "CODEX_HOME=" + SharedHome);
+        public void Dispose() => System.IO.Directory.Delete(SharedHome, recursive: true);
     }
 }

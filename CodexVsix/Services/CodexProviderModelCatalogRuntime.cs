@@ -69,6 +69,24 @@ internal static class CodexProviderModelCatalogRuntime
         return snapshot;
     }
 
+    // The native app-server also loads its model catalog at process startup.
+    // Track that catalog even when no third-party capacity overrides are used.
+    internal static string? ReadNativeModelsKey(CodexExtensionSettings settings)
+    {
+        var home = CodexEnvironmentPathHelper.GetCodexHomeDirectory(settings.EnvironmentVariables);
+        var path = Path.Combine(home, "models_cache.json");
+        try
+        {
+            if (!File.Exists(path)) return null;
+            var cache = JObject.Parse(File.ReadAllText(path));
+            return cache["models"] is JArray models && models.Count > 0
+                ? ComputeModelsKey(models) : null;
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+        catch (JsonException) { return null; }
+    }
+
     internal static string? PrepareFromSnapshot(
         CodexExtensionSettings settings,
         ModelCatalogSnapshot? snapshot,

@@ -103,6 +103,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
             LogInformation);
         _processService.AppServerNotificationReceived += OnAppServerNotificationReceived;
         _processService.ProvidersChanged += OnProvidersChanged;
+        _processService.NativeModelsChanged += OnNativeModelsChanged;
     }
 
     public async Task HandleEnvelopeAsync(JObject envelope, CancellationToken cancellationToken)
@@ -140,6 +141,10 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
             case "official-account-cancel":
                 Post(await _officialAccount.HandleAsync(type, message["requestId"]?.Value<string>(), cancellationToken).ConfigureAwait(false));
                 PostProvidersState();
+                return;
+
+            case "official-models-refresh":
+                await RefreshNativeModelsAsync(message, cancellationToken).ConfigureAwait(false);
                 return;
 
             case "providers-request":
@@ -488,6 +493,33 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
     }
 
     private void OnProvidersChanged() => _ = RefreshProviderQueriesAsync();
+
+    private void OnNativeModelsChanged()
+    {
+        var key = new JArray("models", "list");
+        Post(CreateQueryInvalidationNotification(key));
+        _broadcastQueryInvalidation?.Invoke(key);
+    }
+
+    private async Task RefreshNativeModelsAsync(JObject message, CancellationToken cancellationToken)
+    {
+        var requestId = message["requestId"]?.Value<string>();
+        try
+        {
+            if (_viewModel.IsBusy || _processService.HasActiveProviderWork)
+                throw new InvalidOperationException("当前任务完成后再刷新模型列表。");
+            var models = await _processService.ListModelsAsync(_viewModel.Settings, cancellationToken, includeHidden: true)
+                .ConfigureAwait(false);
+            OnNativeModelsChanged();
+            Post(new JObject { ["type"] = "official-models-state", ["requestId"] = requestId,
+                ["count"] = models.Count });
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Post(new JObject { ["type"] = "official-models-state", ["requestId"] = requestId,
+                ["error"] = ex.Message });
+        }
+    }
 
     private async Task RefreshProviderQueriesAsync()
     {
@@ -2443,7 +2475,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
     {
         return new JObject
         {
-            ["type"] = "mcp-notification",
+            ["type"] = "ipc-broadcast",
             ["hostId"] = "local",
             ["method"] = "query-cache-invalidate",
             ["params"] = new JObject { ["queryKey"] = queryKey.DeepClone() }
@@ -2656,6 +2688,7 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         _appServerRequestRelay.Dispose();
         _processService.AppServerNotificationReceived -= OnAppServerNotificationReceived;
         _processService.ProvidersChanged -= OnProvidersChanged;
+        _processService.NativeModelsChanged -= OnNativeModelsChanged;
         _viewModel.WorkingDirectoryChanged -= OnWorkingDirectoryChanged;
         _viewModel.PropertyChanged -= OnProjectSettingsPropertyChanged;
     }

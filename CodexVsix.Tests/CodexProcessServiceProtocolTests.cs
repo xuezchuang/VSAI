@@ -308,6 +308,34 @@ public sealed class CodexProcessServiceProtocolTests
         Assert.False(fixture.Process.HasExited);
     }
 
+    [Fact]
+    public async Task UpdatedNativeCatalogWaitsForActiveTurnWithoutReplacingItsProcess()
+    {
+        using var directory = new TemporaryDirectory();
+        using var fixture = new CancellationFixture();
+        var settings = new CodexExtensionSettings
+        {
+            CodexExecutablePath = Path.Combine(directory.Path, "not-a-real-codex.exe"),
+            EnvironmentVariables = "CODEX_HOME=" + directory.Path,
+            WorkingDirectory = directory.Path
+        };
+        var cache = Path.Combine(directory.Path, "vsai", "models_cache.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(cache)!);
+        File.WriteAllText(cache, "{\"models\":[{\"slug\":\"official-model\"}]}");
+        var previousKey = CodexProviderModelCatalogRuntime.ReadNativeModelsKey(settings);
+        var configKey = typeof(CodexProcessService).GetMethod("BuildServerConfigKey", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, new object[] { settings });
+        SetField(fixture.Service, "_serverConfigKey", configKey!);
+        SetField(fixture.Service, "_serverModelCatalogKey", previousKey!);
+
+        File.WriteAllText(cache, "{\"models\":[{\"slug\":\"official-model\"},{\"slug\":\"gpt-6-luna\"}]}");
+        await (Task)Invoke(fixture.Service, "EnsureServerReadyAsync", settings, directory.Path, CancellationToken.None)!;
+
+        Assert.False(fixture.Process.HasExited);
+        Assert.Equal(previousKey, GetField(fixture.Service, "_serverModelCatalogKey"));
+        Assert.False(fixture.Completion.Task.IsCompleted);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

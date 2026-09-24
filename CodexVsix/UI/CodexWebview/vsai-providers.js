@@ -13,7 +13,7 @@
     let dialog, fields, returnFocus, selectedId = null, confirmDeleteId = null, providers = [];
     let busy = false, loaded = false, stateRequest = null, writeRequest = null, discoveryRequest = null;
     let officialAccount = { status: 'signed-out', accountType: null, error: null };
-    let officialAccountRequest = null, officialLoginRequest = null, officialCancelRequest = null;
+    let officialAccountRequest = null, officialLoginRequest = null, officialCancelRequest = null, officialModelsRequest = null;
     let message = '', messageIsError = false, scheduled = false, sequence = 0, editRevision = 0;
 
     function el(tag, className, text) {
@@ -163,6 +163,8 @@
         const chatGptSubscription = officialAccount.status === 'signed-in' && officialAccount.accountType !== 'apiKey';
         fields.officialRefresh.disabled = writing || officialAccountRequest !== null || officialCancelRequest !== null;
         fields.officialRefresh.textContent = officialAccountRequest ? '正在读取…' : '刷新登录状态';
+        fields.officialModelsRefresh.disabled = writing || busy || officialModelsRequest !== null;
+        fields.officialModelsRefresh.textContent = officialModelsRequest ? '正在刷新…' : '刷新官方模型';
         fields.officialLogin.hidden = chatGptSubscription;
         fields.officialLogin.disabled = chatGptSubscription || busy || writing || officialAccountPending() || officialCancelRequest !== null;
         fields.officialLogin.textContent = officialAccountPending() ? '正在登录…' : '登录官方账号';
@@ -203,6 +205,14 @@
         const id = nextId(); officialAccountRequest = { requestId: id };
         try { window.acquireVsCodeApi().postMessage({ type: 'official-account-request', requestId: id }); }
         catch (_) { officialAccountRequest = null; officialAccount = { status: 'error', accountType: null, error: '未能读取官方账号状态。请关闭窗口后重试。' }; }
+        controls();
+    }
+    function refreshOfficialModels() {
+        if (busy || writeRequest || officialModelsRequest) return;
+        const id = nextId(); officialModelsRequest = { requestId: id };
+        setMessage('正在从当前用户的 Codex CLI 读取模型列表…', false);
+        try { window.acquireVsCodeApi().postMessage({ type: 'official-models-refresh', requestId: id }); }
+        catch (_) { officialModelsRequest = null; setMessage('未能连接到扩展，请关闭窗口后重试。', true); }
         controls();
     }
     function loginOfficialAccount() {
@@ -339,8 +349,8 @@
         const header = el('div', 'vp-header'), headerText = el('div', 'vp-header-text'), titleHeading = el('h1', '', '模型与服务'); titleHeading.id = 'vsai-providers-title'; headerText.append(titleHeading, el('p', 'vp-subtitle', '点击“刷新”获取服务模型与能力；检查后保存，模型目录才会更新。')); const dismiss = btn('×', 'vp-close', close); dismiss.setAttribute('aria-label', '关闭模型与服务'); header.append(headerText, dismiss);
         const body = el('div', 'vp-body'), sidebar = el('aside', 'vp-sidebar');
         const officialTitle = el('div', 'vp-list-title'), officialCard = el('div', 'vp-card vp-official-card'), officialStatus = el('p', 'vp-info'), officialActions = el('div', 'vp-actions');
-        const officialRefresh = btn('刷新登录状态', '', requestOfficialAccount), officialLogin = btn('登录官方账号', '', loginOfficialAccount), officialCancel = btn('取消登录', '', cancelOfficialAccountLogin);
-        officialStatus.setAttribute('role', 'status'); officialStatus.setAttribute('aria-live', 'polite'); officialActions.append(officialRefresh, officialLogin, officialCancel); officialCard.append(el('h3', '', 'ChatGPT 官方订阅'), officialStatus, officialActions); officialTitle.appendChild(el('h2', '', '官方账号'));
+        const officialRefresh = btn('刷新登录状态', '', requestOfficialAccount), officialModelsRefresh = btn('刷新官方模型', '', refreshOfficialModels), officialLogin = btn('登录官方账号', '', loginOfficialAccount), officialCancel = btn('取消登录', '', cancelOfficialAccountLogin);
+        officialStatus.setAttribute('role', 'status'); officialStatus.setAttribute('aria-live', 'polite'); officialActions.append(officialRefresh, officialModelsRefresh, officialLogin, officialCancel); officialCard.append(el('h3', '', 'ChatGPT 官方订阅'), officialStatus, officialActions); officialTitle.appendChild(el('h2', '', '官方账号'));
         const listTitle = el('div', 'vp-list-title vp-account-title'), newButton = btn('＋ 添加', '', () => select(null)), list = el('div', 'vp-list'); listTitle.append(el('h2', '', '第三方服务'), newButton); sidebar.append(officialTitle, officialCard, listTitle, list);
         const form = el('form'); form.autocomplete = 'off'; form.noValidate = true; const title = el('h2', 'vp-form-title', '添加服务'); form.appendChild(title);
         const name = addField(form, 'vsai-provider-name', '服务名称', 'text', '例如：我的模型服务'); const url = addField(form, 'vsai-provider-url', 'Base URL', 'url', 'https://api.example.com/v1'); form.appendChild(el('p', 'vp-hint', '填写服务商提供的 API 基础地址，需要支持 Responses API。')); const key = addField(form, 'vsai-provider-key', 'API Key', 'password', '请输入 API Key'); form.appendChild(el('p', 'vp-hint', '密钥仅用于该服务；编辑时留空会保留已保存的密钥。'));
@@ -350,7 +360,7 @@
         const status = el('p', 'vp-status'), footer = el('div', 'vp-footer'), saveButton = el('button', 'vp-save', '保存服务'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite'); saveButton.type = 'submit'; footer.append(btn('关闭', '', close), saveButton); form.append(status, footer); form.addEventListener('submit', save);
         name.addEventListener('input', () => dirty(false)); url.addEventListener('input', () => dirty(true)); key.addEventListener('input', () => dirty(true)); source.addEventListener('change', () => dirty(true)); search.addEventListener('input', renderModels);
         const warningBox = el('p', 'vp-status'); warningBox.hidden = true; form.insertBefore(warningBox, status);
-        body.append(sidebar, form); dialog.append(header, body); fields = { list, newButton, name, url, key, source, refresh, syncStatus, search, table, importText, importButton, title, status, warningBox, save: saveButton, officialStatus, officialRefresh, officialLogin, officialCancel, catalog: catalog({}, []), runtimeWarnings: [], discoveryToken: null };
+        body.append(sidebar, form); dialog.append(header, body); fields = { list, newButton, name, url, key, source, refresh, syncStatus, search, table, importText, importButton, title, status, warningBox, save: saveButton, officialStatus, officialRefresh, officialModelsRefresh, officialLogin, officialCancel, catalog: catalog({}, []), runtimeWarnings: [], discoveryToken: null };
         dialog.addEventListener('cancel', event => { event.preventDefault(); close(); }); document.body.appendChild(dialog);
     }
     function requestProviders() {
@@ -377,6 +387,12 @@
     document.addEventListener('click', event => { const target = event.target instanceof Element ? event.target.closest('button.vsai-providers-login') : null; if (!target || !loginButtons.has(target) || !loginRoot(target)) return; event.preventDefault(); event.stopImmediatePropagation(); open(target); }, true);
     window.addEventListener('codex-host-message', event => {
         const state = event.detail;
+        if (state?.type === 'official-models-state') {
+            if (!officialModelsRequest || state.requestId !== officialModelsRequest.requestId) return;
+            officialModelsRequest = null;
+            setMessage(state.error ? String(state.error) : 'Codex CLI 模型列表已重新读取（' + Number(state.count || 0) + ' 项）。', !!state.error);
+            return;
+        }
         if (state?.type === 'official-account-state') {
             const completedState = officialAccountRequest && state.requestId === officialAccountRequest.requestId ? officialAccountRequest : null;
             const completedLogin = officialLoginRequest && state.requestId === officialLoginRequest.requestId ? officialLoginRequest : null;

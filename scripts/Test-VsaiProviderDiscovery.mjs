@@ -68,7 +68,7 @@ try {
   }
   async function edit(page, index = 0) { await page.getByRole('button', { name: '编辑' }).nth(index).click(); }
   async function refresh(page) {
-    await page.getByRole('button', { name: '刷新' }).click();
+    await page.getByRole('button', { name: '刷新', exact: true }).click();
     const request = (await messages(page)).at(-1);
     assert.equal(request.type, 'providers-discover');
     return request;
@@ -123,6 +123,15 @@ try {
     await host(page, { type: 'providers-state', providers: [service('custom', '自定义服务')], isBusy: false });
     assert.equal(await page.getByRole('button', { name: '登录官方账号' }).isVisible(), true);
     assert.equal(await page.getByRole('button', { name: '登录官方账号' }).isDisabled(), false);
+    await page.getByRole('button', { name: '刷新官方模型' }).click();
+    const refreshModels = (await messages(page)).at(-1);
+    assert.equal(refreshModels.type, 'official-models-refresh');
+    assert.equal(await page.getByRole('button', { name: '正在刷新…' }).isDisabled(), true);
+    await host(page, { type: 'official-models-state', requestId: 'stale-models-reply', count: 0 });
+    assert.equal(await page.getByRole('button', { name: '正在刷新…' }).isDisabled(), true);
+    await host(page, { type: 'official-models-state', requestId: refreshModels.requestId, count: 9 });
+    assert.match(await page.locator('.vp-status').last().innerText(), /9 项/);
+    assert.equal(await page.locator('#vsai-provider-key').inputValue(), 'custom-api-key');
     await host(page, { type: 'official-account-state', status: 'signed-in', accountType: 'chatgpt' });
     assert.equal(await page.locator('.vp-official-card .vp-info').innerText(), 'ChatGPT 官方订阅已登录');
     assert.equal(await page.getByRole('button', { name: '登录官方账号' }).isHidden(), true);
@@ -195,7 +204,7 @@ try {
       const table = document.querySelector('.vp-table table');
       return [getComputedStyle(table).color, getComputedStyle(dialog).color];
     }), ['rgb(238, 238, 238)', 'rgb(238, 238, 238)']);
-    assert.deepEqual(await page.getByRole('button', { name: '刷新' }).evaluate(node => [getComputedStyle(node).whiteSpace, node.scrollWidth <= node.clientWidth]), ['nowrap', true]);
+    assert.deepEqual(await page.getByRole('button', { name: '刷新', exact: true }).evaluate(node => [getComputedStyle(node).whiteSpace, node.scrollWidth <= node.clientWidth]), ['nowrap', true]);
     if (screenshotPath) {
       mkdirSync(dirname(screenshotPath), { recursive: true });
       await page.screenshot({ path: screenshotPath, fullPage: true });
@@ -281,7 +290,7 @@ try {
     await edit(page);
     assert.equal(await page.getByRole('button', { name: '保存服务' }).isDisabled(), true);
     assert.equal(await page.getByRole('button', { name: '删除' }).isDisabled(), true);
-    assert.equal(await page.getByRole('button', { name: '刷新' }).isDisabled(), false);
+    assert.equal(await page.getByRole('button', { name: '刷新', exact: true }).isDisabled(), false);
     assert.equal(await page.getByRole('button', { name: '登录官方账号' }).isDisabled(), true);
     await page.close();
   }

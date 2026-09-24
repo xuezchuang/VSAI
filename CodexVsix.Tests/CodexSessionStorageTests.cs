@@ -23,7 +23,7 @@ public sealed class CodexSessionStorageTests
         WriteUtf8(Path.Combine(shared.Path, "AGENTS.md"), "Source user instructions");
         WriteUtf8(Path.Combine(shared.Path, "AGENTS.override.md"), "Source override");
         WriteUtf8(Path.Combine(shared.Path, "provider.config.toml"), "provider source");
-        WriteUtf8(Path.Combine(shared.Path, "models_cache.json"), "{\"models\":[]}");
+        WriteModelCache(shared.Path, "0.154.0", "2026-09-23T04:00:00Z", "official-model");
         WriteUtf8(Path.Combine(shared.Path, "auth.json"), "synthetic auth must stay shared");
         WriteUtf8(Path.Combine(shared.Path, "sessions", "desktop.jsonl"), "synthetic desktop session");
         WriteUtf8(Path.Combine(shared.Path, "archived_sessions", "desktop.jsonl"), "synthetic archived session");
@@ -54,6 +54,50 @@ public sealed class CodexSessionStorageTests
 
         Assert.Equal("model = \"user edit\"", File.ReadAllText(Path.Combine(privateHome, "config.toml")));
         Assert.Equal("User edited instructions", File.ReadAllText(Path.Combine(privateHome, "AGENTS.md")));
+    }
+
+    [Fact]
+    public void PrepareRefreshesOnlyAValidNewerNativeModelCache()
+    {
+        using var shared = new TemporaryDirectory();
+        var environment = EnvironmentFor(shared.Path);
+        var privateHome = CodexEnvironmentPathHelper.GetCodexHomeDirectory(environment);
+        var privateCache = Path.Combine(privateHome, "models_cache.json");
+        WriteModelCache(shared.Path, "0.154.0", "2026-09-23T04:00:00Z", "official-model");
+        CodexSessionStorage.Prepare(environment);
+
+        WriteModelCache(shared.Path, "0.155.0", "2026-09-24T00:33:56.605954700Z",
+            "official-model", "gpt-6-luna");
+        CodexSessionStorage.Prepare(environment);
+        Assert.Contains("gpt-6-luna", File.ReadAllText(privateCache));
+        var lastGood = File.ReadAllBytes(privateCache);
+
+        WriteModelCache(shared.Path, "0.154.0", "2026-09-25T00:00:00Z", "older-cli-model");
+        CodexSessionStorage.Prepare(environment);
+        Assert.Equal(lastGood, File.ReadAllBytes(privateCache));
+
+        WriteUtf8(Path.Combine(shared.Path, "models_cache.json"), "{\"models\":[");
+        CodexSessionStorage.Prepare(environment);
+        Assert.Equal(lastGood, File.ReadAllBytes(privateCache));
+        Assert.False(File.Exists(Path.Combine(privateHome, "auth.json")));
+        Assert.False(File.Exists(Path.Combine(privateHome, "state.sqlite")));
+    }
+
+    [Fact]
+    public void PrepareDoesNotReplaceAValidPrivateCacheWithAnOlderFetch()
+    {
+        using var shared = new TemporaryDirectory();
+        var environment = EnvironmentFor(shared.Path);
+        var privateHome = CodexEnvironmentPathHelper.GetCodexHomeDirectory(environment);
+        WriteModelCache(shared.Path, "0.155.0", "2026-09-24T01:00:00Z", "newer-model");
+        CodexSessionStorage.Prepare(environment);
+        var privateCache = Path.Combine(privateHome, "models_cache.json");
+        var lastGood = File.ReadAllBytes(privateCache);
+
+        WriteModelCache(shared.Path, "0.155.0", "2026-09-24T00:30:00Z", "stale-model");
+        CodexSessionStorage.Prepare(environment);
+
+        Assert.Equal(lastGood, File.ReadAllBytes(privateCache));
     }
 
     [Fact]
@@ -218,5 +262,15 @@ public sealed class CodexSessionStorageTests
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, contents, new UTF8Encoding(false));
+    }
+
+    private static void WriteModelCache(string home, string version, string fetchedAt, params string[] slugs)
+    {
+        WriteUtf8(Path.Combine(home, "models_cache.json"), new JObject
+        {
+            ["client_version"] = version,
+            ["fetched_at"] = fetchedAt,
+            ["models"] = new JArray(slugs.Select(slug => new JObject { ["slug"] = slug }))
+        }.ToString());
     }
 }

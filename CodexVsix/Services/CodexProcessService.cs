@@ -90,6 +90,7 @@ public sealed class CodexProcessService : IDisposable
     public event Action<CodexRateLimitSummary>? RateLimitsUpdated;
     public event Action? AccountUpdated;
     internal event Action? ProvidersChanged;
+    internal event Action? NativeModelsChanged;
     internal IReadOnlyList<string> ProviderCatalogRuntimeWarnings { get; private set; } = Array.Empty<string>();
     internal string SessionMigrationError { get; private set; } = string.Empty;
     internal bool HasActiveProviderWork => _providerRouter.IsBusy || _activeTurn is not null;
@@ -1011,6 +1012,7 @@ public sealed class CodexProcessService : IDisposable
             await Task.Run(() => CodexSessionStorage.Prepare(settings.EnvironmentVariables), cancellationToken).ConfigureAwait(false);
             var desiredServerConfig = BuildServerConfigKey(settings);
             CodexProviderModelCatalogRuntime.ModelCatalogSnapshot? catalogSnapshot = null;
+            string? desiredModelKey = null;
             Task? initializedTask = null;
             var isReady = false;
             var hasMatchingServer = false;
@@ -1034,9 +1036,12 @@ public sealed class CodexProcessService : IDisposable
                 try
                 {
                     catalogSnapshot = CodexProviderModelCatalogRuntime.ReadSnapshot(settings);
+                    desiredModelKey = catalogSnapshot?.Key
+                        ?? CodexProviderModelCatalogRuntime.ReadNativeModelsKey(settings);
                     ProviderCatalogRuntimeWarnings = CodexProviderModelCatalogRuntime.GetRuntimeWarnings(settings, catalogSnapshot);
-                    isReady = hasMatchingServer && string.Equals(_serverModelCatalogKey,
-                        catalogSnapshot?.Key ?? string.Empty, StringComparison.Ordinal);
+                    // An incomplete cache write must not tear down a working server.
+                    isReady = hasMatchingServer && (desiredModelKey is null
+                        || string.Equals(_serverModelCatalogKey, desiredModelKey, StringComparison.Ordinal));
                 }
                 catch (Exception ex) when (hasMatchingServer && (ex is IOException
                     || ex is UnauthorizedAccessException || ex is Newtonsoft.Json.JsonException
@@ -1062,6 +1067,8 @@ public sealed class CodexProcessService : IDisposable
 
             // Generate from the exact snapshot whose key will identify this process.
             var modelCatalogPath = CodexProviderModelCatalogRuntime.PrepareFromSnapshot(settings, catalogSnapshot);
+            var nativeModelsChanged = hasMatchingServer && desiredModelKey is not null
+                && !string.Equals(_serverModelCatalogKey, desiredModelKey, StringComparison.Ordinal);
             if (_serverProcess is not null && !_serverProcess.HasExited)
             {
                 ThrowIfProviderChangeUnsafe();
@@ -1071,7 +1078,7 @@ public sealed class CodexProcessService : IDisposable
             lock (_syncRoot)
             {
                 _serverConfigKey = desiredServerConfig;
-                _serverModelCatalogKey = catalogSnapshot?.Key ?? string.Empty;
+                _serverModelCatalogKey = desiredModelKey ?? string.Empty;
                 _initializedTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 _lastServerError = string.Empty;
             }
@@ -1081,6 +1088,16 @@ public sealed class CodexProcessService : IDisposable
                 StartServerProcess(settings, workingDirectory, modelCatalogPath);
                 await InitializeServerAsync(cancellationToken).ConfigureAwait(false);
                 await MigrateSessionStorageAsync(settings, cancellationToken).ConfigureAwait(false);
+                if (nativeModelsChanged)
+                {
+                    try { NativeModelsChanged?.Invoke(); }
+                    catch (Exception ex)
+                    {
+                        // A WebView notification failure must not invalidate a ready CLI process.
+                        _diagnostics.Write("appserver.model-catalog.notification-failed",
+                            new JObject { ["errorType"] = ex.GetType().FullName });
+                    }
+                }
             }
             catch (Exception ex)
             {

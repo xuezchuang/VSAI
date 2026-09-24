@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -30,26 +31,85 @@ internal static class CodexSessionStorage
                 EnsurePrivateDirectory(Path.Combine(target, name));
 
             var marker = Path.Combine(target, ".vsai-storage-v1.json");
-            if (File.Exists(marker)) return;
-            // A one-time configuration snapshot retains profiles and user guidance.
-            // Account auth.json is not cloned: refresh tokens have their own
-            // lifecycle. Existing provider settings inside config files are retained.
-            var names = new List<string> { "config.toml", "AGENTS.md", "AGENTS.override.md", "models_cache.json" };
-            if (Directory.Exists(source))
-                names.AddRange(Directory.EnumerateFiles(source, "*.config.toml", SearchOption.TopDirectoryOnly).Select(path => Path.GetFileName(path)));
-            foreach (var name in names.Distinct(StringComparer.OrdinalIgnoreCase))
+            if (!File.Exists(marker))
             {
-                var from = Path.Combine(source, name);
-                var to = Path.Combine(target, name);
-                if (File.Exists(from) && !File.Exists(to))
+                // Configuration and user guidance are snapshots; account credentials
+                // and conversation state remain owned by their respective homes.
+                var names = new List<string> { "config.toml", "AGENTS.md", "AGENTS.override.md" };
+                if (Directory.Exists(source))
+                    names.AddRange(Directory.EnumerateFiles(source, "*.config.toml", SearchOption.TopDirectoryOnly).Select(path => Path.GetFileName(path)));
+                foreach (var name in names.Distinct(StringComparer.OrdinalIgnoreCase))
                 {
-                    if (name.EndsWith(".toml", StringComparison.OrdinalIgnoreCase)) CodexConfigurationSnapshot.Copy(from, to);
-                    else CopyAtomically(from, to);
+                    var from = Path.Combine(source, name);
+                    var to = Path.Combine(target, name);
+                    if (File.Exists(from) && !File.Exists(to))
+                    {
+                        if (name.EndsWith(".toml", StringComparison.OrdinalIgnoreCase)) CodexConfigurationSnapshot.Copy(from, to);
+                        else CopyAtomically(from, to);
+                    }
                 }
+                WriteNewFile(marker, new JObject { ["version"] = 1, ["sharedHome"] = source }.ToString());
             }
-            WriteNewFile(marker, new JObject { ["version"] = 1, ["sharedHome"] = source }.ToString());
+            RefreshOfficialModelCache(source, target);
         }
         finally { if (acquired) mutex.ReleaseMutex(); }
+    }
+
+    private static void RefreshOfficialModelCache(string sourceHome, string privateHome)
+    {
+        var source = Path.Combine(sourceHome, "models_cache.json");
+        var target = Path.Combine(privateHome, "models_cache.json");
+        if (!TryReadModelCache(source, out var sourceBytes, out var sourceVersion, out var sourceFetched)) return;
+        if (TryReadModelCache(target, out _, out var targetVersion, out var targetFetched)
+            && (sourceVersion.CompareTo(targetVersion) < 0 || sourceFetched <= targetFetched)) return;
+
+        var temporary = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            if (File.Exists(target) && (File.GetAttributes(target) & FileAttributes.ReparsePoint) != 0) return;
+            File.WriteAllBytes(temporary, sourceBytes);
+            if (File.Exists(target)) File.Replace(temporary, target, null);
+            else File.Move(temporary, target);
+        }
+        catch (IOException) { /* A CLI may be writing its cache; keep the last good copy. */ }
+        catch (UnauthorizedAccessException) { /* The model cache is optional runtime data. */ }
+        finally
+        {
+            try { if (File.Exists(temporary)) File.Delete(temporary); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    private static bool TryReadModelCache(string path, out byte[] bytes, out Version version, out DateTimeOffset fetched)
+    {
+        bytes = Array.Empty<byte>();
+        version = new Version(0, 0);
+        fetched = default;
+        try
+        {
+            if (!File.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) return false;
+            var before = new FileInfo(path);
+            var length = before.Length;
+            var lastWrite = before.LastWriteTimeUtc;
+            if (length <= 0 || length > 16 * 1024 * 1024) return false;
+            bytes = File.ReadAllBytes(path);
+            var after = new FileInfo(path);
+            if (length != bytes.Length || after.Length != length
+                || after.LastWriteTimeUtc != lastWrite) return false;
+            var cache = JObject.Parse(Encoding.UTF8.GetString(bytes));
+            if (!Version.TryParse(cache["client_version"]?.Value<string>(), out version)
+                || !DateTimeOffset.TryParse(cache["fetched_at"]?.Value<string>(), CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal, out fetched)
+                || cache["models"] is not JArray models || models.Count == 0) return false;
+            var ids = new HashSet<string>(StringComparer.Ordinal);
+            return models.All(model => model is JObject record
+                && record["slug"]?.Value<string>() is string id && !string.IsNullOrWhiteSpace(id) && ids.Add(id));
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (Newtonsoft.Json.JsonException) { return false; }
+        catch (ArgumentException) { return false; }
     }
 
     internal static void ApplyEnvironment(ProcessStartInfo startInfo, string? environmentVariables, bool migrationSource = false)

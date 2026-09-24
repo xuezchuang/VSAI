@@ -182,9 +182,13 @@ public sealed class CodexOfficialWebViewBridgeTests
         Assert.Equal("host-rpc", original[0]?.Value<string>());
 
         var notification = CodexOfficialWebViewBridge.CreateQueryInvalidationNotification(original);
-        Assert.Equal("mcp-notification", notification["type"]?.Value<string>());
+        Assert.Equal("ipc-broadcast", notification["type"]?.Value<string>());
         Assert.Equal("query-cache-invalidate", notification["method"]?.Value<string>());
         Assert.Equal("host-rpc", notification["params"]?["queryKey"]?[0]?.Value<string>());
+        var appBundle = File.ReadAllText(FindRepositoryFile("CodexVsix", "UI", "CodexWebview",
+            "webview", "assets", "app-main-CV7KqdWX.js"));
+        Assert.Contains("case`ipc-broadcast`:HN(", appBundle);
+        Assert.Contains("if(n.method===`query-cache-invalidate`){i.invalidateQueries({queryKey:n.params.queryKey})", appBundle);
         Assert.Null(CodexOfficialWebViewBridge.NormalizeQueryKeyForBroadcast(new JArray()));
         Assert.Null(CodexOfficialWebViewBridge.NormalizeQueryKeyForBroadcast(
             new JArray(Enumerable.Range(0, 33))));

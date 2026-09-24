@@ -20,6 +20,11 @@ The host restarts an idle app-server when that CLI package changes. When provide
 capacity overrides require a generated catalog, it also watches the shared CLI
 cache's model content and rebuilds from the same snapshot used to identify that
 process. Active work and incomplete cache writes defer this refresh.
+The private VSAI home refreshes only a complete, newer native model cache from
+the current user's shared Codex home. Native catalog changes also restart an idle
+app-server and invalidate the model query. The official account card's model
+refresh button requests this path explicitly; it does not change credentials,
+configuration, or conversation storage.
 `CodexConversationForkWebViewCompatibility` uses the native inclusive
 `thread/fork.lastTurnId` cutoff because paginated
 threads reject the frozen UI's fork-then-rollback flow. It retains the upstream

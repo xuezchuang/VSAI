@@ -677,6 +677,18 @@ internal sealed class CodexOfficialWebViewHost : Grid, IDisposable
         NavigateTo("/", focusComposer: true);
     }
 
+    public void AddSelectionAttachment(JObject attachment)
+    {
+        _bridge.HideHistoryWindow();
+        _bridge.PostSharedObject(
+            "composer_prefill",
+            new JObject
+            {
+                ["selectedTextAttachments"] = new JArray(attachment.DeepClone()),
+                ["cwd"] = ResolveWorkingDirectory()
+            });
+    }
+
     public void StartNewConversation()
     {
         _bridge.HideHistoryWindow();
@@ -1122,6 +1134,18 @@ internal static class CodexOfficialWebViewHostRegistry
 
         RunOnUiThreadAsync(() => host.PrefillComposer(text), "PrefillComposer")
             .FileAndForget("CodexVsix/OfficialWebViewPrefillComposer");
+        return true;
+    }
+
+    public static bool TryAddSelectionAttachment(JObject attachment)
+    {
+        if (!TryGet(out var host))
+        {
+            return false;
+        }
+
+        RunOnUiThreadAsync(() => host.AddSelectionAttachment(attachment), "AddSelectionAttachment")
+            .FileAndForget("CodexVsix/OfficialWebViewAddSelectionAttachment");
         return true;
     }
 

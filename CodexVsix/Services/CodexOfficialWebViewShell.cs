@@ -79,12 +79,14 @@ internal static class CodexOfficialWebViewShell
         var diagnosticsPath = Path.Combine(resourceRoot, "codex-visual-studio-diagnostics.js");
         var projectSettingsPath = Path.Combine(resourceRoot, "vsai-project-settings.js");
         var providersPath = Path.Combine(resourceRoot, "vsai-providers.js");
+        var chatSelectionNavigationPath = Path.Combine(resourceRoot, "vsai-chat-selection-navigation.js");
         if (!File.Exists(indexPath)
             || !File.Exists(shimPath)
             || !File.Exists(historyGuardPath)
             || !File.Exists(diagnosticsPath)
             || !File.Exists(projectSettingsPath)
-            || !File.Exists(providersPath))
+            || !File.Exists(providersPath)
+            || !File.Exists(chatSelectionNavigationPath))
         {
             var missingPath = !File.Exists(indexPath)
                 ? indexPath
@@ -96,7 +98,9 @@ internal static class CodexOfficialWebViewShell
                             ? diagnosticsPath
                             : !File.Exists(projectSettingsPath)
                                 ? projectSettingsPath
-                                : providersPath;
+                                : !File.Exists(providersPath)
+                                    ? providersPath
+                                    : chatSelectionNavigationPath;
             throw new FileNotFoundException("The bundled Codex webview is incomplete.", missingPath);
         }
 
@@ -147,6 +151,7 @@ internal static class CodexOfficialWebViewShell
         var diagnostics = File.ReadAllText(diagnosticsPath);
         var projectSettings = File.ReadAllText(projectSettingsPath);
         var providers = File.ReadAllText(providersPath);
+        var chatSelectionNavigation = File.ReadAllText(chatSelectionNavigationPath);
         var injection = "<style>" + theme.ToCss() + "</style>\n"
             + ThemeAdapter + "\n"
             + WebView2TransportAdapter + "\n"
@@ -154,7 +159,8 @@ internal static class CodexOfficialWebViewShell
             + "<script>" + historyGuard + "</script>\n"
             + "<script>" + diagnostics + "</script>\n"
             + "<script>" + projectSettings + "</script>\n"
-            + "<script>" + providers + "</script>\n";
+            + "<script>" + providers + "</script>\n"
+            + "<script>" + chatSelectionNavigation + "</script>\n";
         html = Regex.Replace(
             html,
             "(<script\\b(?=[^>]*\\btype=([\"'])module\\2)[^>]*>)",

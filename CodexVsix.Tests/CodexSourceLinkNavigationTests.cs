@@ -36,4 +36,29 @@ public sealed class CodexSourceLinkNavigationTests
         Assert.Equal(line, target.Line);
         Assert.Equal(column, target.Column);
     }
+
+    [Fact]
+    public void RelativeOfficialSourceLinkUsesOnlyAnUnambiguousSolutionFile()
+    {
+        using var temp = new TemporaryDirectory();
+        var project = Path.Combine(temp.Path, "project");
+        var other = Path.Combine(temp.Path, "other");
+        Directory.CreateDirectory(Path.Combine(project, "src"));
+        Directory.CreateDirectory(Path.Combine(other, "src"));
+        var expected = Path.Combine(project, "src", "Example.cpp");
+        var duplicate = Path.Combine(other, "src", "Example.cpp");
+        File.WriteAllText(expected, "int target;\r\n");
+        File.WriteAllText(duplicate, "int other;\r\n");
+        var request = new JObject { ["path"] = "src/Example.cpp:23", ["column"] = 4 };
+
+        Assert.False(CodexOfficialWebViewBridge.TryResolveOpenFileRequest(request, temp.Path, out _));
+        Assert.True(CodexOfficialWebViewBridge.TryResolveOpenFileRequestFromSolution(
+            request, temp.Path, () => new[] { expected }, out var target));
+        Assert.Equal(expected, target.Path);
+        Assert.Equal(23, target.Line);
+        Assert.Equal(4, target.Column);
+
+        Assert.False(CodexOfficialWebViewBridge.TryResolveOpenFileRequestFromSolution(
+            request, temp.Path, () => new[] { expected, duplicate }, out _));
+    }
 }

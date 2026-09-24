@@ -11,7 +11,15 @@ WebView2 transport, IDE theme variables, locale, and app-server bridge at
 runtime; the bundled UI assets are otherwise kept unchanged.
 
 The host's hash-guarded import map creates runtime compatibility copies for
-reasoning effort controls and conversation forks.
+reasoning effort controls, conversation forks, and IDE selection attachments.
+Selection badges retain source coordinates so a click can open the original
+file in Visual Studio. Sent selections recover their file and line from the
+serialized selection heading when available.
+Selections from a chat answer also retain their conversation turn and text
+offsets. The host-owned `vsai-chat-selection-navigation.js` captures that
+origin, uses the frozen UI's virtualized turn scroll API, and highlights the
+selected range when the composer badge or its tooltip entry is clicked.
+
 The guarded adapters load the app-server catalog and saved model/effort
 configuration initially, retaining them until explicit changes invalidate their
 queries. Neither query polls or refetches on window focus or network reconnect;

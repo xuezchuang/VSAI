@@ -8,6 +8,7 @@ using CodexVsix.UI;
 using CodexVsix.ViewModels;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
+using Newtonsoft.Json.Linq;
 
 namespace CodexVsix;
 
@@ -23,8 +24,6 @@ internal sealed class CodexIdeCommands
         AddCommand(commandService, PackageIds.NewCodexAgentCommand, ExecuteNewAgentAsync);
         AddCommand(commandService, PackageIds.AddSelectionToThreadCommand, ExecuteAddSelectionAsync);
         AddCommand(commandService, PackageIds.AddFileToThreadCommand, ExecuteAddFileAsync);
-        AddCommand(commandService, PackageIds.ReviewSelectionCommand, ExecuteReviewSelectionAsync);
-        AddCommand(commandService, PackageIds.ImplementTodoCommand, ExecuteImplementTodoAsync);
         AddCommand(commandService, PackageIds.OpenCodexSettingsCommand, ExecuteOpenSettingsAsync);
     }
 
@@ -69,18 +68,45 @@ internal sealed class CodexIdeCommands
     private async Task ExecuteAddSelectionAsync()
     {
         await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(_package.DisposalToken);
+        var selection = _solutionContextService.GetActiveSelectionForAttachment();
         var viewModel = await ShowCodexAsync();
-        var context = BuildSelectionContext(viewModel, includeInstruction: false);
-        if (string.IsNullOrWhiteSpace(context))
+        if (selection is null)
         {
             ShowMessage(viewModel.Localization.SelectCodeOrOpenFileMessage);
             viewModel.RequestComposerFocus();
             return;
         }
 
-        if (!CodexOfficialWebViewHostRegistry.TryPrefillComposer(context))
+        var attachment = new JObject
         {
-            viewModel.AppendComposerContextFromIdeCommand(context);
+            ["id"] = Guid.NewGuid().ToString("N"),
+            ["text"] = selection.Text
+        };
+        if (!string.IsNullOrWhiteSpace(selection.Path)
+            && selection.StartLine.HasValue && selection.StartColumn.HasValue
+            && selection.EndLine.HasValue && selection.EndColumn.HasValue)
+        {
+            attachment["source"] = new JObject
+            {
+                ["path"] = selection.Path,
+                ["range"] = new JObject
+                {
+                    ["start"] = new JObject { ["line"] = selection.StartLine.Value, ["character"] = selection.StartColumn.Value },
+                    ["end"] = new JObject { ["line"] = selection.EndLine.Value, ["character"] = selection.EndColumn.Value }
+                }
+            };
+        }
+        else if (!string.IsNullOrWhiteSpace(selection.Path))
+        {
+            var relativePath = _solutionContextService.FormatPathForPrompt(
+                viewModel.Settings.WorkingDirectory, selection.Path!);
+            attachment["text"] = "File: " + FormatFileMention(relativePath)
+                + Environment.NewLine + Environment.NewLine + selection.Text;
+        }
+
+        if (!CodexOfficialWebViewHostRegistry.TryAddSelectionAttachment(attachment))
+        {
+            viewModel.AppendComposerContextFromIdeCommand(BuildSelectionContext(viewModel, selection));
         }
     }
 
@@ -102,56 +128,6 @@ internal sealed class CodexIdeCommands
         }
     }
 
-    private async Task ExecuteReviewSelectionAsync()
-    {
-        await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(_package.DisposalToken);
-        var viewModel = await ShowCodexAsync();
-        var context = BuildSelectionContext(viewModel, includeInstruction: true);
-        if (string.IsNullOrWhiteSpace(context))
-        {
-            ShowMessage(viewModel.Localization.SelectCodeForReviewMessage);
-            viewModel.RequestComposerFocus();
-            return;
-        }
-
-        var prompt = "/review" + Environment.NewLine + Environment.NewLine + context;
-        if (CodexOfficialWebViewHostRegistry.TryPrefillComposer(prompt))
-        {
-            return;
-        }
-
-        if (string.Equals(viewModel.Settings.ReviewDelivery, "detached", StringComparison.OrdinalIgnoreCase))
-        {
-            viewModel.StartNewAgentFromIdeCommand();
-        }
-
-        viewModel.ReplaceComposerPromptFromIdeCommand(prompt);
-    }
-
-    private async Task ExecuteImplementTodoAsync()
-    {
-        await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(_package.DisposalToken);
-        var viewModel = await ShowCodexAsync();
-        var context = BuildSelectionContext(viewModel, includeInstruction: true);
-        if (string.IsNullOrWhiteSpace(context))
-        {
-            context = BuildFileContext(viewModel);
-        }
-
-        if (string.IsNullOrWhiteSpace(context))
-        {
-            ShowMessage(viewModel.Localization.OpenFileOrSelectTodoMessage);
-            viewModel.RequestComposerFocus();
-            return;
-        }
-
-        var prompt = viewModel.Localization.ImplementWithCodexInstruction + Environment.NewLine + Environment.NewLine + context;
-        if (!CodexOfficialWebViewHostRegistry.TryPrefillComposer(prompt))
-        {
-            viewModel.ReplaceComposerPromptFromIdeCommand(prompt);
-        }
-    }
-
     private async Task ExecuteOpenSettingsAsync()
     {
         await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(_package.DisposalToken);
@@ -165,31 +141,20 @@ internal sealed class CodexIdeCommands
         return CodexViewModelHost.GetOrCreate();
     }
 
-    private string BuildSelectionContext(CodexToolWindowViewModel viewModel, bool includeInstruction)
+    private string BuildSelectionContext(
+        CodexToolWindowViewModel viewModel,
+        SolutionContextService.ActiveEditorSelection selection)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        var selection = _solutionContextService.GetActiveSelectionSnippetForPrompt();
-        if (string.IsNullOrWhiteSpace(selection))
-        {
-            return string.Empty;
-        }
-
         var workingDirectory = viewModel.Settings.WorkingDirectory;
-        var activeDocument = _solutionContextService.GetActiveDocumentPath();
-        var relativePath = string.IsNullOrWhiteSpace(activeDocument)
+        var relativePath = string.IsNullOrWhiteSpace(selection.Path)
             ? viewModel.Localization.ActiveEditorLabel
-            : _solutionContextService.FormatPathForPrompt(workingDirectory, activeDocument!);
+            : _solutionContextService.FormatPathForPrompt(workingDirectory, selection.Path!);
 
         var builder = new System.Text.StringBuilder();
-        if (includeInstruction)
-        {
-            builder.AppendLine(viewModel.Localization.IdeSelectionInstruction);
-            builder.AppendLine();
-        }
-
         builder.AppendLine("File: " + FormatFileMention(relativePath));
         builder.AppendLine();
-        builder.AppendLine(BuildFencedCode(relativePath, selection));
+        builder.AppendLine(BuildFencedCode(relativePath, selection.Text));
         return builder.ToString().Trim();
     }
 

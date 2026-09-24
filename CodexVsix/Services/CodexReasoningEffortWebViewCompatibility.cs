@@ -13,6 +13,8 @@ namespace CodexVsix.Services;
 internal static class CodexReasoningEffortWebViewCompatibility
 {
     internal const string ComposerModule = "composer-B3BCMq_W.js";
+    internal const string ComposerViewStateModule = "composer-view-state-snaLlb2D.js";
+    internal const string LocalConversationThreadModule = "local-conversation-thread-WLjaXjZ7.js";
     internal const string LabelModule = "reasoning-minimal-BmczWw15.js";
     internal const string SettingsModule = "use-model-settings-D_RJ6qrG.js";
     internal const string ModelQueriesModule = "model-queries-BOnPKCmp.js";
@@ -22,6 +24,8 @@ internal static class CodexReasoningEffortWebViewCompatibility
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
             [ComposerModule] = "03b05c10f98be300790c094ee70d258907835c2cbcddc5b382d1dc97ed1f6b8d",
+            [ComposerViewStateModule] = "e5af6f9162d951544cd80040ff06b41f579d6fcbdec2d51d249a401bb19ecf26",
+            [LocalConversationThreadModule] = "15045243b7652d771d8d869885284c136ddc6d2541a0791f938a54afb6dd95f4",
             [LabelModule] = "752677eaa4d9f3021b6ac4a05c6a0f778301ad2d4449f655bb01afa9316e0907",
             [SettingsModule] = "1fc45f6af86f26d85b653b2c835210dc9f999752527e8e824b5fc229045d2c6c",
             [ModelQueriesModule] = "9713d9213242bdcf73c3a15acff4323388d2b6b9922c073616536936dde700e5",
@@ -81,10 +85,56 @@ internal static class CodexReasoningEffortWebViewCompatibility
 
         switch (moduleName)
         {
+            case ComposerViewStateModule:
+                // Store the conversation origin beside the selected text so even
+                // duplicate snippets point back to the exact turn and text range.
+                source = ReplaceOnce(source,
+                    "function Q(e,n,r){let i=n.trim();i.length!==0&&Z(e,e=>{e.selectedTextAttachments.push({id:t(),text:r==null?i:n,...r==null?{}:{source:r}})})}",
+                    "function Q(e,n,r,a){let i=n.trim();i.length!==0&&Z(e,e=>{e.selectedTextAttachments.push({id:t(),text:r==null?i:n,...r==null?{}:{source:r},...a==null?{}:{vsaiChatOrigin:a}})})}");
+                break;
+            case LocalConversationThreadModule:
+                // Reuse the official virtualized turn list's scroll API. Direct
+                // DOM scrolling cannot reach turns that are currently unmounted.
+                source = ReplaceOnce(source,
+                    "Ce=(0,X.useMemo)(()=>Yp(",
+                    "vsaiScrollEffect=(0,X.useEffect)(()=>{window.__vsaiChatSelectionNavigation?.registerScroll(e,Se.scrollToTurn);return()=>window.__vsaiChatSelectionNavigation?.unregisterScroll(e,Se.scrollToTurn)},[e,Se]),Ce=(0,X.useMemo)(()=>Yp(");
+                break;
             case CodexConversationForkWebViewCompatibility.ManagerModule:
                 source = CodexConversationForkWebViewCompatibility.AdaptModule(source);
+                // Sent selections are reconstructed from the prompt. Preserve the
+                // source heading for navigation while keeping plain snippets intact.
+                source = ReplaceOnce(source,
+                    "function sf(e){return ",
+                    "function sf(e){let h=e[0]?.match(/^## Selection \\d+: (.+) \\(lines? (\\d+)(?:-(\\d+))?\\)$/),line=Number(h?.[2]);if(h?.[1]&&Number.isSafeInteger(line)&&line>0)return{text:e.slice(1).join(String.fromCharCode(10)).trim(),source:{path:h[1],range:{start:{line:line-1,character:0},end:{line:line-1,character:0}}}};return ");
                 break;
             case ComposerModule:
+                // The official composer already renders and submits selected-text
+                // attachments. Let an IDE prefill populate that existing state.
+                source = ReplaceOnce(source,
+                    "let e=ko?.commentAttachments;ko==null||!ko.text&&(e==null||e.length===0)||(",
+                    "let e=ko?.commentAttachments,t=ko?.selectedTextAttachments;ko==null||!ko.text&&(e==null||e.length===0)&&(t==null||t.length===0)||(");
+                source = ReplaceOnce(source,
+                    "e!=null&&e.length>0&&ya(e),X.focus(),Ao(void 0)",
+                    "e!=null&&e.length>0&&ya(e),t!=null&&t.length>0&&xa(e=>[...e,...t]),X.focus(),Ao(void 0)");
+                source = ReplaceOnce(source,
+                    "selections:v.map(Qd),onRemove:E",
+                    "selections:v,onRemove:E");
+                source = ReplaceOnce(source,
+                    "function Ld(e){",
+                    "function __vsaiSelectionTarget(e){let s=e?.source,p=s?.path,l=s?.range?.start?.line,c=s?.range?.start?.character;return typeof p===`string`&&p.length>0&&Number.isSafeInteger(l)&&l>=0?{path:p,line:l+1,...Number.isSafeInteger(c)&&c>=0?{column:c+1}:{}}:null}function __vsaiOpenSelection(e){let t=__vsaiSelectionTarget(e);if(t!=null)__vsaiOpenFile(t);else if(e?.vsaiChatOrigin!=null)window.__vsaiChatSelectionNavigation?.reveal(e.vsaiChatOrigin)}function Ld(e){");
+                source = ReplaceOnce(source,
+                    "l=(0,Q.jsx)(Pd,{Icon:Gc,label:a,onRemove:r,onRemoveAriaLabel:o,popoverClassName:`w-fit gap-2 px-2 py-1`,popoverContent:s,popoverStyle:c})",
+                    "l=(0,Q.jsx)(`span`,{onClick:()=>{n.length===1&&__vsaiOpenSelection(n[0])},children:(0,Q.jsx)(Pd,{Icon:Gc,label:a,onRemove:r,onRemoveAriaLabel:o,popoverClassName:`w-fit gap-2 px-2 py-1`,popoverContent:s,popoverStyle:c})})");
+                source = ReplaceOnce(source,
+                    "function zd(e,t){return(0,Q.jsx)(`span`,{className:`line-clamp-3 break-words`,children:(0,Q.jsx)(Y,{id:`selectedTextAttachments.tooltipSnippet`,defaultMessage:`\"{text}\"`,description:`Selected text snippet shown inside the selected text attachment tooltip`,values:{text:e}})},`${t}-${e}`)}",
+                    "function zd(e,t){let n=typeof e===`string`?e:e?.text??``,r=__vsaiSelectionTarget(e),a=e?.vsaiChatOrigin,c=(0,Q.jsx)(Y,{id:`selectedTextAttachments.tooltipSnippet`,defaultMessage:`\"{text}\"`,description:`Selected text snippet shown inside the selected text attachment tooltip`,values:{text:n}});return r==null&&a==null?(0,Q.jsx)(`span`,{className:`line-clamp-3 break-words`,children:c},`${t}-${n}`):(0,Q.jsx)(`button`,{type:`button`,className:`line-clamp-3 cursor-interaction break-words text-left hover:underline`,title:r?`${r.path}:${r.line}`:n,onClick:t=>{t.stopPropagation();__vsaiOpenSelection(e)},children:c},`${t}-${n}`)}");
+                source = ReplaceOnce(source,
+                    "a=()=>{window.getSelection()?.removeAllRanges(),n(i)}",
+                    "a=()=>{let e=window.__vsaiChatSelectionNavigation?.capture(i);window.getSelection()?.removeAllRanges(),n(i,e)}");
+                source = ReplaceOnce(source,
+                    "_c=(0,Z.useCallback)(e=>{e.trim().length!==0&&(Cr(H,e),Do())},[Do,H])",
+                    "_c=(0,Z.useCallback)((e,t)=>{e.trim().length!==0&&(Cr(H,e,void 0,t==null?null:{...t,conversationId:K}),Do())},[Do,H,K])");
+                source = "import{t as __vsaiOpenFile}from\"./send-open-file-request-CF2gTAWF.js\";\n" + source;
                 // Reuse the existing highest-effort glyph, without changing the value
                 // used by the menu, selection callback, telemetry or request payload.
                 source = ReplaceOnce(source,

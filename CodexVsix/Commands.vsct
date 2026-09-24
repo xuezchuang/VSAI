@@ -53,15 +53,6 @@
           <LocCanonicalName>VSAI.OpenSettings</LocCanonicalName>
         </Strings>
       </Button>
-      <Button guid="guidCodexCommandSet" id="ImplementTodoCommand" priority="0x0100" type="Button">
-        <Parent guid="guidCodexCommandSet" id="CodexEditorContextGroup" />
-        <Icon guid="guidImages" id="bmpPic1" />
-        <Strings>
-          <ButtonText>Implement with Codex</ButtonText>
-          <CommandName>VSAI.ImplementWithCodex</CommandName>
-          <LocCanonicalName>VSAI.ImplementWithCodex</LocCanonicalName>
-        </Strings>
-      </Button>
       <Button guid="guidCodexCommandSet" id="AddSelectionToThreadCommand" priority="0x0110" type="Button">
         <Parent guid="guidCodexCommandSet" id="CodexEditorContextGroup" />
         <Icon guid="guidImages" id="bmpPic1" />
@@ -69,15 +60,6 @@
           <ButtonText>Add to Codex Thread</ButtonText>
           <CommandName>VSAI.AddToThread</CommandName>
           <LocCanonicalName>VSAI.AddToThread</LocCanonicalName>
-        </Strings>
-      </Button>
-      <Button guid="guidCodexCommandSet" id="ReviewSelectionCommand" priority="0x0120" type="Button">
-        <Parent guid="guidCodexCommandSet" id="CodexEditorContextGroup" />
-        <Icon guid="guidImages" id="bmpPic1" />
-        <Strings>
-          <ButtonText>Review with Codex</ButtonText>
-          <CommandName>VSAI.ReviewSelection</CommandName>
-          <LocCanonicalName>VSAI.ReviewSelection</LocCanonicalName>
         </Strings>
       </Button>
       <Button guid="guidCodexCommandSet" id="AddFileToThreadCommand" priority="0x0100" type="Button">
@@ -111,8 +93,6 @@
       <IDSymbol name="NewCodexAgentCommand" value="0x0102" />
       <IDSymbol name="AddSelectionToThreadCommand" value="0x0103" />
       <IDSymbol name="AddFileToThreadCommand" value="0x0104" />
-      <IDSymbol name="ReviewSelectionCommand" value="0x0105" />
-      <IDSymbol name="ImplementTodoCommand" value="0x0106" />
       <IDSymbol name="OpenCodexSettingsCommand" value="0x0107" />
     </GuidSymbol>
     <GuidSymbol name="guidImages" value="{3CDC7701-15F4-48AD-A3D5-EEEBDBB2BA30}">

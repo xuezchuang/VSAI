@@ -7,7 +7,5 @@ internal static class PackageIds
     public const int NewCodexAgentCommand = 0x0102;
     public const int AddSelectionToThreadCommand = 0x0103;
     public const int AddFileToThreadCommand = 0x0104;
-    public const int ReviewSelectionCommand = 0x0105;
-    public const int ImplementTodoCommand = 0x0106;
     public const int OpenCodexSettingsCommand = 0x0107;
 }

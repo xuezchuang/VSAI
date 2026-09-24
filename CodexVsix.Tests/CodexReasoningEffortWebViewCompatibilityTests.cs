@@ -19,6 +19,8 @@ public sealed class CodexReasoningEffortWebViewCompatibilityTests
         var moduleNames = new[]
         {
             CodexReasoningEffortWebViewCompatibility.ComposerModule,
+            CodexReasoningEffortWebViewCompatibility.ComposerViewStateModule,
+            CodexReasoningEffortWebViewCompatibility.LocalConversationThreadModule,
             CodexReasoningEffortWebViewCompatibility.LabelModule,
             CodexReasoningEffortWebViewCompatibility.SettingsModule,
             CodexReasoningEffortWebViewCompatibility.ModelQueriesModule,
@@ -37,7 +39,8 @@ public sealed class CodexReasoningEffortWebViewCompatibilityTests
             var preloadIndex = html.IndexOf("rel=\"modulepreload\"", StringComparison.Ordinal);
             Assert.True(preloadIndex < 0 || match.Index < preloadIndex);
             var imports = (JObject)JObject.Parse(match.Groups[1].Value)["imports"]!;
-            Assert.Equal(5, imports.Count);
+            Assert.Equal(7, imports.Count);
+            Assert.Contains("window.__vsaiChatSelectionNavigation =", html);
 
             foreach (var name in moduleNames)
             {
@@ -56,15 +59,27 @@ public sealed class CodexReasoningEffortWebViewCompatibilityTests
             var composer = File.ReadAllText(Path.Combine(output, "reasoning-compatibility-test-efforts", moduleNames[0]));
             Assert.Contains("max:Sa,ultra:Sa", composer);
             Assert.Contains("f(d.model,t),V()", composer);
+            Assert.Contains("selections:v,onRemove:E", composer);
+            Assert.Contains("function __vsaiSelectionTarget(e)", composer);
+            Assert.Contains("__vsaiOpenFile(t)", composer);
+            Assert.Contains("__vsaiChatSelectionNavigation?.capture(i);window.getSelection()?.removeAllRanges()", composer);
+            Assert.Contains("Cr(H,e,void 0,t==null?null:{...t,conversationId:K})", composer);
+            Assert.Contains("__vsaiChatSelectionNavigation?.reveal(e.vsaiChatOrigin)", composer);
             Assert.Contains(CodexReasoningEffortWebViewCompatibility.AssetBaseUrl + "dialog-layout-sS9Dm_y9.css", composer);
-            var labels = File.ReadAllText(Path.Combine(output, "reasoning-compatibility-test-efforts", moduleNames[1]));
+            var viewState = File.ReadAllText(Path.Combine(output, "reasoning-compatibility-test-efforts", moduleNames[1]));
+            Assert.Contains("vsaiChatOrigin:a", viewState);
+            var conversation = File.ReadAllText(Path.Combine(output, "reasoning-compatibility-test-efforts", moduleNames[2]));
+            Assert.Contains("registerScroll(e,Se.scrollToTurn)", conversation);
+            Assert.Contains("unregisterScroll(e,Se.scrollToTurn)", conversation);
+            var labels = File.ReadAllText(Path.Combine(output, "reasoning-compatibility-test-efforts", moduleNames[3]));
             Assert.Contains("case`max`:return`Max`;case`ultra`:return`Ultra`;", labels);
-            var settings = File.ReadAllText(Path.Combine(output, "reasoning-compatibility-test-efforts", moduleNames[2]));
+            var settings = File.ReadAllText(Path.Combine(output, "reasoning-compatibility-test-efforts", moduleNames[4]));
             Assert.Contains("||e===`max`||e===`ultra`)&&t.includes(e)?e:k", settings);
-            var manager = File.ReadAllText(Path.Combine(output, "reasoning-compatibility-test-efforts", moduleNames[4]));
+            var manager = File.ReadAllText(Path.Combine(output, "reasoning-compatibility-test-efforts", moduleNames[6]));
             Assert.Contains(CodexConversationForkWebViewCompatibility.ForkFromTurnAfter, manager);
             Assert.DoesNotContain(CodexConversationForkWebViewCompatibility.ForkFromTurnBefore, manager);
             Assert.Contains("lastTurnId:vsaiLastTurnId", manager);
+            Assert.Contains("function sf(e){let h=e[0]?.match(", manager);
         }
         finally
         {

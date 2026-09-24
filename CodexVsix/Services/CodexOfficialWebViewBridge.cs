@@ -1753,7 +1753,13 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
     {
         if (!TryResolveOpenFileRequest(values, ResolveWorkingDirectory(), out var target))
         {
-            return new JObject { ["success"] = false };
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            if (!TryResolveOpenFileRequestFromSolution(values,
+                _solutionContextService.TryGetSolutionDirectory(),
+                _solutionContextService.GetSolutionFilePaths, out target))
+            {
+                return new JObject { ["success"] = false };
+            }
         }
 
         await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
@@ -1783,6 +1789,34 @@ internal sealed class CodexOfficialWebViewBridge : IDisposable
         }
 
         target = new SolutionContextService.FileNavigationTarget(parsed.Path, line, column);
+        return true;
+    }
+
+    internal static bool TryResolveOpenFileRequestFromSolution(JObject values, string? solutionDirectory,
+        Func<IEnumerable<string>> getSolutionFiles, out SolutionContextService.FileNavigationTarget target)
+    {
+        target = default;
+        var reference = values["path"]?.Type == JTokenType.String ? values["path"]!.Value<string>() : null;
+        if (string.IsNullOrWhiteSpace(reference))
+        {
+            reference = values["uri"]?.Type == JTokenType.String ? values["uri"]!.Value<string>() : null;
+        }
+
+        if (!SolutionContextService.TryParseFileReference(reference, out var parsed)
+            || Path.IsPathRooted(parsed.Path) || !Path.HasExtension(parsed.Path)
+            || !TryReadNavigationCoordinate(values["line"], parsed.Line, out var line)
+            || !TryReadNavigationCoordinate(values["column"], parsed.Column, out var column))
+        {
+            return false;
+        }
+
+        var path = SolutionContextService.FindUnambiguousSolutionFile(parsed.Path, solutionDirectory, getSolutionFiles());
+        if (path is null)
+        {
+            return false;
+        }
+
+        target = new SolutionContextService.FileNavigationTarget(Path.GetFullPath(path), line, column);
         return true;
     }
 

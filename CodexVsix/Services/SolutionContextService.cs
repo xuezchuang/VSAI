@@ -115,6 +115,80 @@ public sealed class SolutionContextService
         return TryGetActiveSelectionSnippet(maxLength);
     }
 
+    internal ActiveEditorSelection? GetActiveSelectionForAttachment()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        var text = GetActiveSelectionSnippetForPrompt();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        var path = GetActiveDocumentPath();
+        try
+        {
+            var dte = Package.GetGlobalService(typeof(DTE)) as DTE;
+            var document = dte?.ActiveDocument;
+            if (!string.IsNullOrWhiteSpace(path)
+                && string.Equals(document?.FullName, path, StringComparison.OrdinalIgnoreCase)
+                && document?.Selection is TextSelection selection
+                && string.Equals(NormalizeSelectionSnippet(selection.Text, 6000), text, StringComparison.Ordinal))
+            {
+                var start = selection.TopPoint;
+                var end = selection.BottomPoint;
+                return new ActiveEditorSelection(text, path,
+                    start.Line - 1, start.LineCharOffset - 1,
+                    end.Line - 1, end.LineCharOffset - 1);
+            }
+        }
+        catch
+        {
+            // Some editor implementations expose text but not DTE selection points.
+        }
+
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(path)
+                && string.Equals(TryGetActiveTextViewDocumentPath(), path, StringComparison.OrdinalIgnoreCase)
+                && TryGetActiveTextView(out var textView)
+                && ErrorHandler.Succeeded(textView!.GetSelection(
+                    out var startLine, out var startColumn, out var endLine, out var endColumn))
+                && (startLine != endLine || startColumn != endColumn))
+            {
+                NormalizeSelectionRange(ref startLine, ref startColumn, ref endLine, ref endColumn);
+                return new ActiveEditorSelection(text, path,
+                    startLine, startColumn, endLine, endColumn);
+            }
+        }
+        catch
+        {
+            // Keep the selected text even when an editor cannot provide a range.
+        }
+
+        return new ActiveEditorSelection(text, path);
+    }
+
+    internal sealed class ActiveEditorSelection
+    {
+        internal ActiveEditorSelection(string text, string? path,
+            int? startLine = null, int? startColumn = null, int? endLine = null, int? endColumn = null)
+        {
+            Text = text;
+            Path = path;
+            StartLine = startLine;
+            StartColumn = startColumn;
+            EndLine = endLine;
+            EndColumn = endColumn;
+        }
+
+        public string Text { get; }
+        public string? Path { get; }
+        public int? StartLine { get; }
+        public int? StartColumn { get; }
+        public int? EndLine { get; }
+        public int? EndColumn { get; }
+    }
+
     public IReadOnlyList<string> GetOpenDocumentPathsForIdeContext()
     {
         ThreadHelper.ThrowIfNotOnUIThread();

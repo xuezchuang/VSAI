@@ -170,6 +170,51 @@ internal static class CodexSessionStorage
             CodexEnvironmentPathHelper.GetSharedCodexHomeDirectory(settings.EnvironmentVariables));
     }
 
+    internal static (string Model, string? Provider)? ReadLastTurnModel(
+        CodexExtensionSettings settings, string threadId, string? reportedPath)
+    {
+        var home = CodexEnvironmentPathHelper.GetCodexHomeDirectory(settings.EnvironmentVariables);
+        var path = CodexProcessService.ResolvePrivateSessionPath(reportedPath, threadId, home);
+        if (path is null || !File.Exists(path)) return null;
+
+        string? sourceId = null;
+        string? model = null;
+        string? provider = null;
+        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete))
+        using (var reader = new StreamReader(stream, Encoding.UTF8))
+        {
+            string? line;
+            while ((line = reader.ReadLine()) is not null)
+            {
+                // Most rollout entries contain private prompts or tool output. Parse
+                // only the two metadata envelopes needed for model restoration.
+                if (!line.Contains("\"session_meta\"") && !line.Contains("\"turn_context\"")) continue;
+                JObject entry;
+                try { entry = JObject.Parse(line.TrimStart('\ufeff')); }
+                catch (Newtonsoft.Json.JsonException) { continue; } // Interrupted final JSONL write.
+                var type = entry["type"]?.Value<string>();
+                var payload = entry["payload"];
+                if (type == "session_meta")
+                {
+                    sourceId ??= payload?["id"]?.Value<string>();
+                    provider ??= payload?["model_provider"]?.Value<string>()
+                        ?? payload?["modelProvider"]?.Value<string>();
+                }
+                else if (type == "turn_context")
+                {
+                    var last = payload?["model"]?.Value<string>();
+                    if (!string.IsNullOrWhiteSpace(last)) model = last;
+                    provider = payload?["model_provider"]?.Value<string>()
+                        ?? payload?["modelProvider"]?.Value<string>() ?? provider;
+                }
+            }
+        }
+        if (sourceId is not null && sourceId != threadId)
+            throw new InvalidDataException("VSAI 会话文件与请求的会话 ID 不一致。");
+        return sourceId is not null && !string.IsNullOrWhiteSpace(model) ? (model!, provider) : null;
+    }
+
     internal static bool IsWithinDirectory(string path, string directory)
     {
         var fullPath = NormalizeAbsolutePath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);

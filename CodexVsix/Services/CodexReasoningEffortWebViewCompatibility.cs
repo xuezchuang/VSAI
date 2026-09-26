@@ -101,6 +101,22 @@ internal static class CodexReasoningEffortWebViewCompatibility
                 break;
             case CodexConversationForkWebViewCompatibility.ManagerModule:
                 source = CodexConversationForkWebViewCompatibility.AdaptModule(source);
+                // History-list placeholders have no known model yet. A hard-coded
+                // model here is mistaken for a real previous model on resume.
+                source = ReplaceOnce(source,
+                    "model:`gpt-5.5`,effort:`medium`,summary:`none`",
+                    "model:``,effort:`medium`,summary:`none`");
+                source = ReplaceOnce(source,
+                    "previousTurnModel:null,latestCollaborationMode:{mode:`default`,settings:{reasoning_effort:`medium`,model:`gpt-5.5`,developer_instructions:null}}",
+                    "previousTurnModel:null,latestCollaborationMode:{mode:`default`,settings:{reasoning_effort:`medium`,model:``,developer_instructions:null}}");
+                source = ReplaceOnce(source,
+                    "hasUnreadTurn:this.params.getThreadHasUnreadTurn(t),latestCollaborationMode:{mode:`default`,settings:{reasoning_effort:`medium`,model:`gpt-5.5`,developer_instructions:null}}",
+                    "hasUnreadTurn:this.params.getThreadHasUnreadTurn(t),latestCollaborationMode:{mode:`default`,settings:{reasoning_effort:`medium`,model:``,developer_instructions:null}}");
+                // The history list carries the persisted provider. The picker built
+                // from a placeholder model can otherwise report the global provider.
+                source = ReplaceOnce(source,
+                    "path:l?.rolloutPath??null,model:null,modelProvider:N.modelProvider,serviceTier:N.serviceTier",
+                    "path:l?.rolloutPath??null,model:null,modelProvider:l?.modelProvider??N.modelProvider,serviceTier:N.serviceTier");
                 // Sent selections are reconstructed from the prompt. Preserve the
                 // source heading for navigation while keeping plain snippets intact.
                 source = ReplaceOnce(source,
@@ -108,14 +124,11 @@ internal static class CodexReasoningEffortWebViewCompatibility
                     "function sf(e){let h=e[0]?.match(/^## Selection \\d+: (.+) \\(lines? (\\d+)(?:-(\\d+))?\\)$/),line=Number(h?.[2]);if(h?.[1]&&Number.isSafeInteger(line)&&line>0)return{text:e.slice(1).join(String.fromCharCode(10)).trim(),source:{path:h[1],range:{start:{line:line-1,character:0},end:{line:line-1,character:0}}}};return ");
                 break;
             case ComposerModule:
-                // The official composer already renders and submits selected-text
-                // attachments. Let an IDE prefill populate that existing state.
+                // The shared-object hook reacts to prefill updates on every route.
+                // In a follow-up, append selections without replacing its draft.
                 source = ReplaceOnce(source,
-                    "let e=ko?.commentAttachments;ko==null||!ko.text&&(e==null||e.length===0)||(",
-                    "let e=ko?.commentAttachments,t=ko?.selectedTextAttachments;ko==null||!ko.text&&(e==null||e.length===0)&&(t==null||t.length===0)||(");
-                source = ReplaceOnce(source,
-                    "e!=null&&e.length>0&&ya(e),X.focus(),Ao(void 0)",
-                    "e!=null&&e.length>0&&ya(e),t!=null&&t.length>0&&xa(e=>[...e,...t]),X.focus(),Ao(void 0)");
+                    "let e=ko?.commentAttachments;ko==null||!ko.text&&(e==null||e.length===0)||(K??(ko.cwd==null?H.set(Vs,null):H.set(Vs,ko.cwd),ko.text&&(ir(ko.text)?X.setPromptText(ko.text):X.setText(ko.text)),e!=null&&e.length>0&&ya(e),X.focus(),Ao(void 0))",
+                    "let e=ko?.commentAttachments,t=ko?.selectedTextAttachments;ko==null||!ko.text&&(e==null||e.length===0)&&(t==null||t.length===0)||(K?(t!=null&&t.length>0&&(xa(e=>[...e,...t]),X.focus(),Ao(void 0))):(ko.cwd==null?H.set(Vs,null):H.set(Vs,ko.cwd),ko.text&&(ir(ko.text)?X.setPromptText(ko.text):X.setText(ko.text)),e!=null&&e.length>0&&ya(e),t!=null&&t.length>0&&xa(e=>[...e,...t]),X.focus(),Ao(void 0))");
                 source = ReplaceOnce(source,
                     "selections:v.map(Qd),onRemove:E",
                     "selections:v,onRemove:E");

@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using CodexVsix.Models;
@@ -12,6 +14,42 @@ namespace CodexVsix.Tests;
 
 public sealed class CodexProviderSessionRouterTests
 {
+    [Fact]
+    public async Task ColdHistoryResumeUsesItsLastTurnModelInsteadOfTheGlobalDefault()
+    {
+        using var shared = new TemporaryDirectory();
+        var harness = new Harness();
+        harness.Settings.EnvironmentVariables = "CODEX_HOME=" + shared.Path;
+        harness.Settings.DefaultModel = "gpt-5.5";
+        var privateHome = CodexEnvironmentPathHelper.GetCodexHomeDirectory(harness.Settings.EnvironmentVariables);
+        var path = Path.Combine(privateHome, "sessions", "same-thread.jsonl");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"same-thread\",\"model_provider\":\"openai\"}}\n"
+            + "{\"type\":\"turn_context\",\"payload\":{\"model\":\"shared-model\"}}\n",
+            new UTF8Encoding(false));
+
+        var response = await harness.Invoke("thread/resume", new JObject
+        {
+            ["threadId"] = "same-thread", ["path"] = path, ["model"] = JValue.CreateNull(),
+            ["modelProvider"] = harness.ProviderId
+        });
+
+        var sent = Assert.Single(harness.Requests.Where(request => request.Method == "thread/resume")).Values;
+        Assert.Equal("shared-model", sent["model"]?.Value<string>());
+        Assert.Equal(harness.ProviderId, sent["modelProvider"]?.Value<string>());
+        Assert.Equal(harness.Alias, response?["model"]?.Value<string>());
+
+        var explicitChoice = new Harness();
+        explicitChoice.Settings.EnvironmentVariables = harness.Settings.EnvironmentVariables;
+        await explicitChoice.Invoke("thread/resume", new JObject
+        {
+            ["threadId"] = "same-thread", ["path"] = path,
+            ["model"] = "official-model", ["modelProvider"] = "openai"
+        });
+        Assert.Equal("official-model", explicitChoice.Requests.Single().Values["model"]?.Value<string>());
+    }
+
     [Fact]
     public async Task HistoryIncludesAllProvidersButRespectsAnExplicitFilter()
     {

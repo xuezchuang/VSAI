@@ -60,6 +60,7 @@ public sealed class CodexReasoningEffortWebViewCompatibilityTests
             Assert.Contains("max:Sa,ultra:Sa", composer);
             Assert.Contains("f(d.model,t),V()", composer);
             Assert.Contains("selections:v,onRemove:E", composer);
+            Assert.Contains("K?(t!=null&&t.length>0&&(xa(e=>[...e,...t]),X.focus(),Ao(void 0)))", composer);
             Assert.Contains("function __vsaiSelectionTarget(e)", composer);
             Assert.Contains("__vsaiOpenFile(t)", composer);
             Assert.Contains("__vsaiChatSelectionNavigation?.capture(i);window.getSelection()?.removeAllRanges()", composer);
@@ -80,6 +81,10 @@ public sealed class CodexReasoningEffortWebViewCompatibilityTests
             Assert.DoesNotContain(CodexConversationForkWebViewCompatibility.ForkFromTurnBefore, manager);
             Assert.Contains("lastTurnId:vsaiLastTurnId", manager);
             Assert.Contains("function sf(e){let h=e[0]?.match(", manager);
+            Assert.Contains("model:``,effort:`medium`,summary:`none`", manager);
+            Assert.Contains("latestCollaborationMode:{mode:`default`,settings:{reasoning_effort:`medium`,model:``,developer_instructions:null}}", manager);
+            Assert.DoesNotContain("latestCollaborationMode:{mode:`default`,settings:{reasoning_effort:`medium`,model:`gpt-5.5`,developer_instructions:null}}", manager);
+            Assert.Contains("modelProvider:l?.modelProvider??N.modelProvider,serviceTier:N.serviceTier", manager);
         }
         finally
         {

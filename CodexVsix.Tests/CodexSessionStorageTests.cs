@@ -186,6 +186,28 @@ public sealed class CodexSessionStorageTests
     }
 
     [Fact]
+    public void LastTurnModelComesOnlyFromTheMatchingPrivateRollout()
+    {
+        using var shared = new TemporaryDirectory();
+        var settings = Settings(shared.Path);
+        var privateHome = CodexEnvironmentPathHelper.GetCodexHomeDirectory(settings.EnvironmentVariables);
+        var path = Path.Combine(privateHome, "sessions", "thread-1.jsonl");
+        WriteUtf8(path, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-1\",\"model_provider\":\"vsai_provider\"}}\n"
+            + "{\"type\":\"turn_context\",\"payload\":{\"model\":\"older-model\"}}\n"
+            + "{\"type\":\"turn_context\",\"payload\":{\"model\":\"last-model\"}}\n");
+
+        var last = CodexSessionStorage.ReadLastTurnModel(settings, "thread-1", path);
+        Assert.True(last.HasValue);
+        Assert.Equal("last-model", last.Value.Model);
+        Assert.Equal("vsai_provider", last.Value.Provider);
+        Assert.Throws<InvalidDataException>(() => CodexSessionStorage.ReadLastTurnModel(settings, "another-thread", path));
+
+        var desktop = Path.Combine(shared.Path, "sessions", "desktop-only.jsonl");
+        WriteUtf8(desktop, "{\"type\":\"turn_context\",\"payload\":{\"model\":\"wrong-home\"}}\n");
+        Assert.Throws<InvalidOperationException>(() => CodexSessionStorage.ReadLastTurnModel(settings, "desktop-only", desktop));
+    }
+
+    [Fact]
     public void MigrationSourceUsesSharedHomeButPreservesItsExistingSqliteHomeWhileDisablingMemories()
     {
         using var shared = new TemporaryDirectory();

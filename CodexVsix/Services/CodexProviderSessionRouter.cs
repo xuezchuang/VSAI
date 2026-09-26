@@ -121,6 +121,30 @@ internal sealed class CodexProviderSessionRouter
             if (intercepted is not null) return intercepted;
         }
 
+        // The frozen client resumes history with model:null. Recover this thread's
+        // latest actual turn model instead of falling back to the current global model.
+        if (method == "thread/resume" && string.IsNullOrWhiteSpace(values["model"]?.Value<string>())
+            && string.IsNullOrWhiteSpace(values["collaborationMode"]?["settings"]?["model"]?.Value<string>())
+            && values["threadId"]?.Value<string>() is string resumeId)
+        {
+            var last = await Task.Run(() => CodexSessionStorage.ReadLastTurnModel(
+                settings, resumeId, values["path"]?.Value<string>()), cancellationToken).ConfigureAwait(false);
+            if (last is not null)
+            {
+                var provider = values["modelProvider"]?.Value<string>() ?? last.Value.Provider;
+                if (provider?.StartsWith("vsai_", StringComparison.Ordinal) == true)
+                {
+                    var configured = settings.Providers.FirstOrDefault(candidate => candidate is not null
+                        && CodexProviderConfigurationService.GetProviderId(candidate) == provider);
+                    if (configured is null)
+                        throw new InvalidOperationException("源会话使用的服务或模型已被移除，请重新选择模型。");
+                    values["model"] = CodexProviderModelCatalog.Alias(configured, last.Value.Model);
+                }
+                else values["model"] = last.Value.Model;
+                if (!string.IsNullOrWhiteSpace(provider)) values["modelProvider"] = provider;
+            }
+        }
+
         var routesModel = method == "thread/start" || method == "thread/resume" || method == "thread/fork"
             || method == "turn/start" || method == "thread/settings/update";
         var selection = routesModel ? ResolveSelection(settings, values, method) : null;

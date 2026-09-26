@@ -688,6 +688,10 @@ internal sealed class CodexOfficialWebViewHost : Grid, IDisposable
                 ["selectedTextAttachments"] = new JArray(attachment.DeepClone()),
                 ["cwd"] = ResolveWorkingDirectory()
             });
+        if (string.Equals(_currentRoute, "/", StringComparison.Ordinal))
+        {
+            NavigateTo("/", focusComposer: true);
+        }
     }
 
     public void StartNewConversation()

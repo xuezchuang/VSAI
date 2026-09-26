@@ -51,6 +51,72 @@ public sealed class CodexProviderSessionRouterTests
     }
 
     [Fact]
+    public async Task ColdHistoryResumeUsesTheProviderThatRanItsLastTurn()
+    {
+        using var shared = new TemporaryDirectory();
+        var harness = new Harness();
+        harness.Settings.EnvironmentVariables = "CODEX_HOME=" + shared.Path;
+        var privateHome = CodexEnvironmentPathHelper.GetCodexHomeDirectory(harness.Settings.EnvironmentVariables);
+
+        async Task<JObject> ResumeAfterSwitchAsync(string threadId, string startProvider, string startModel, string lastProvider, string lastModel)
+        {
+            var path = Path.Combine(privateHome, "sessions", threadId + ".jsonl");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path,
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"" + threadId + "\",\"model_provider\":\"" + startProvider + "\"}}\n"
+                + "{\"type\":\"turn_context\",\"payload\":{\"model\":\"" + startModel + "\"}}\n"
+                + "{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"thread_id\":\"" + threadId
+                + "\",\"thread_settings\":{\"model\":\"" + lastModel + "\",\"model_provider_id\":\"" + lastProvider + "\"}}}\n"
+                + "{\"type\":\"turn_context\",\"payload\":{\"model\":\"" + lastModel + "\"}}\n",
+                new UTF8Encoding(false));
+            // The client resumes without a model, sending the provider the history list reports:
+            // the one the thread started with.
+            await harness.Invoke("thread/resume", new JObject
+            {
+                ["threadId"] = threadId, ["path"] = path,
+                ["model"] = JValue.CreateNull(), ["modelProvider"] = startProvider
+            });
+            return harness.Requests.Last(request => request.Method == "thread/resume").Values;
+        }
+
+        // The custom provider the thread started on does not list the official model.
+        var official = await ResumeAfterSwitchAsync("custom-then-official", harness.ProviderId, "shared-model", "openai", "official-model");
+        Assert.Equal("official-model", official["model"]?.Value<string>());
+        Assert.Equal("openai", official["modelProvider"]?.Value<string>());
+
+        var custom = await ResumeAfterSwitchAsync("official-then-custom", "openai", "official-model", harness.ProviderId, "shared-model");
+        Assert.Equal("shared-model", custom["model"]?.Value<string>());
+        Assert.Equal(harness.ProviderId, custom["modelProvider"]?.Value<string>());
+    }
+
+    [Fact]
+    public async Task ColdHistoryResumeOfAThreadWithoutTurnsUsesItsAppliedSettings()
+    {
+        using var shared = new TemporaryDirectory();
+        var harness = new Harness();
+        harness.Settings.EnvironmentVariables = "CODEX_HOME=" + shared.Path;
+        var privateHome = CodexEnvironmentPathHelper.GetCodexHomeDirectory(harness.Settings.EnvironmentVariables);
+        var path = Path.Combine(privateHome, "sessions", "new-fork.jsonl");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        // A paginated fork keeps its parent's turns elsewhere and records only its own settings.
+        File.WriteAllText(path,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"new-fork\",\"model_provider\":\"" + harness.ProviderId + "\"}}\n"
+            + "{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"thread_id\":\"new-fork\","
+            + "\"thread_settings\":{\"model\":\"shared-model\",\"model_provider_id\":\"" + harness.ProviderId + "\"}}}\n",
+            new UTF8Encoding(false));
+
+        await harness.Invoke("thread/resume", new JObject
+        {
+            ["threadId"] = "new-fork", ["path"] = path,
+            ["model"] = JValue.CreateNull(), ["modelProvider"] = harness.ProviderId
+        });
+
+        var sent = Assert.Single(harness.Requests, request => request.Method == "thread/resume").Values;
+        Assert.Equal("shared-model", sent["model"]?.Value<string>());
+        Assert.Equal(harness.ProviderId, sent["modelProvider"]?.Value<string>());
+    }
+
+    [Fact]
     public async Task HistoryIncludesAllProvidersButRespectsAnExplicitFilter()
     {
         var harness = new Harness();

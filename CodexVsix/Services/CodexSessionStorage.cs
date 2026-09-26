@@ -170,7 +170,7 @@ internal static class CodexSessionStorage
             CodexEnvironmentPathHelper.GetSharedCodexHomeDirectory(settings.EnvironmentVariables));
     }
 
-    internal static (string Model, string? Provider)? ReadLastTurnModel(
+    internal static (string Model, string? Provider, bool ProviderRecorded)? ReadLastTurnModel(
         CodexExtensionSettings settings, string threadId, string? reportedPath)
     {
         var home = CodexEnvironmentPathHelper.GetCodexHomeDirectory(settings.EnvironmentVariables);
@@ -180,6 +180,13 @@ internal static class CodexSessionStorage
         string? sourceId = null;
         string? model = null;
         string? provider = null;
+        var providerRecorded = false;
+        string? activeProvider = null;
+        var activeRecorded = false;
+        var sessionMetaSeen = false;
+        string? appliedModel = null;
+        string? appliedProvider = null;
+        var appliedRecorded = false;
         using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete))
         using (var reader = new StreamReader(stream, Encoding.UTF8))
@@ -188,31 +195,68 @@ internal static class CodexSessionStorage
             while ((line = reader.ReadLine()) is not null)
             {
                 // Most rollout entries contain private prompts or tool output. Parse
-                // only the two metadata envelopes needed for model restoration.
-                if (!line.Contains("\"session_meta\"") && !line.Contains("\"turn_context\"")) continue;
+                // only the metadata envelopes needed for model restoration.
+                if (!line.Contains("\"session_meta\"") && !line.Contains("\"turn_context\"")
+                    && !line.Contains("\"thread_settings_applied\"")) continue;
                 JObject entry;
                 try { entry = JObject.Parse(line.TrimStart('\ufeff')); }
                 catch (Newtonsoft.Json.JsonException) { continue; } // Interrupted final JSONL write.
                 var type = entry["type"]?.Value<string>();
                 var payload = entry["payload"];
+                // turn_context omits the provider, so pair the last turn with the provider in effect
+                // when it ran. A mid-thread switch is recorded only by thread_settings_applied, and a
+                // legacy fork's copied parent history starts with the parent's session_meta. Only the
+                // opening session_meta is unrecorded: the history list reports that same provider.
                 if (type == "session_meta")
                 {
                     sourceId ??= payload?["id"]?.Value<string>();
-                    provider ??= payload?["model_provider"]?.Value<string>()
-                        ?? payload?["modelProvider"]?.Value<string>();
+                    UseProvider(payload?["model_provider"]?.Value<string>()
+                        ?? payload?["modelProvider"]?.Value<string>(), sessionMetaSeen);
+                    sessionMetaSeen = true;
+                }
+                else if (type == "event_msg" && payload?["type"]?.Value<string>() == "thread_settings_applied")
+                {
+                    var applied = payload?["thread_settings"];
+                    UseProvider(applied?["model_provider_id"]?.Value<string>(), recorded: true);
+                    var appliedName = applied?["model"]?.Value<string>();
+                    if (!string.IsNullOrWhiteSpace(appliedName))
+                    {
+                        appliedModel = appliedName;
+                        appliedProvider = activeProvider;
+                        appliedRecorded = activeRecorded;
+                    }
                 }
                 else if (type == "turn_context")
                 {
+                    UseProvider(payload?["model_provider"]?.Value<string>()
+                        ?? payload?["modelProvider"]?.Value<string>(), recorded: true);
                     var last = payload?["model"]?.Value<string>();
-                    if (!string.IsNullOrWhiteSpace(last)) model = last;
-                    provider = payload?["model_provider"]?.Value<string>()
-                        ?? payload?["modelProvider"]?.Value<string>() ?? provider;
+                    if (!string.IsNullOrWhiteSpace(last))
+                    {
+                        model = last;
+                        provider = activeProvider;
+                        providerRecorded = activeRecorded;
+                    }
                 }
             }
         }
         if (sourceId is not null && sourceId != threadId)
             throw new InvalidDataException("VSAI 会话文件与请求的会话 ID 不一致。");
-        return sourceId is not null && !string.IsNullOrWhiteSpace(model) ? (model!, provider) : null;
+        // A new fork, or a thread whose first turn never ran, has only the settings it was created with.
+        if (string.IsNullOrWhiteSpace(model) && appliedModel is not null)
+        {
+            model = appliedModel;
+            provider = appliedProvider;
+            providerRecorded = appliedRecorded;
+        }
+        return sourceId is not null && !string.IsNullOrWhiteSpace(model) ? (model!, provider, providerRecorded) : null;
+
+        void UseProvider(string? value, bool recorded)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return;
+            activeProvider = value;
+            activeRecorded = recorded;
+        }
     }
 
     internal static bool IsWithinDirectory(string path, string directory)

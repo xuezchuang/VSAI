@@ -131,7 +131,10 @@ internal sealed class CodexProviderSessionRouter
                 settings, resumeId, values["path"]?.Value<string>()), cancellationToken).ConfigureAwait(false);
             if (last is not null)
             {
-                var provider = values["modelProvider"]?.Value<string>() ?? last.Value.Provider;
+                // The history list reports the provider the thread started with. After a mid-thread
+                // switch, the provider recorded for the last turn must stay paired with its model.
+                var provider = last.Value.ProviderRecorded ? last.Value.Provider
+                    : values["modelProvider"]?.Value<string>() ?? last.Value.Provider;
                 if (provider?.StartsWith("vsai_", StringComparison.Ordinal) == true)
                 {
                     var configured = settings.Providers.FirstOrDefault(candidate => candidate is not null

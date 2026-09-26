@@ -200,11 +200,46 @@ public sealed class CodexSessionStorageTests
         Assert.True(last.HasValue);
         Assert.Equal("last-model", last.Value.Model);
         Assert.Equal("vsai_provider", last.Value.Provider);
+        Assert.False(last.Value.ProviderRecorded);
         Assert.Throws<InvalidDataException>(() => CodexSessionStorage.ReadLastTurnModel(settings, "another-thread", path));
 
         var desktop = Path.Combine(shared.Path, "sessions", "desktop-only.jsonl");
         WriteUtf8(desktop, "{\"type\":\"turn_context\",\"payload\":{\"model\":\"wrong-home\"}}\n");
         Assert.Throws<InvalidOperationException>(() => CodexSessionStorage.ReadLastTurnModel(settings, "desktop-only", desktop));
+    }
+
+    [Fact]
+    public void LastTurnModelKeepsTheProviderThatRanIt()
+    {
+        using var shared = new TemporaryDirectory();
+        var settings = Settings(shared.Path);
+        var privateHome = CodexEnvironmentPathHelper.GetCodexHomeDirectory(settings.EnvironmentVariables);
+        var path = Path.Combine(privateHome, "sessions", "thread-1.jsonl");
+        // A switch made after the last turn must not re-pair that turn's model.
+        WriteUtf8(path, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-1\",\"model_provider\":\"vsai_provider\"}}\n"
+            + "{\"type\":\"turn_context\",\"payload\":{\"model\":\"custom-model\"}}\n"
+            + SettingsApplied("thread-1", "openai", "official-model")
+            + "{\"type\":\"turn_context\",\"payload\":{\"model\":\"official-model\"}}\n"
+            + SettingsApplied("thread-1", "vsai_provider", "custom-model"));
+
+        var last = CodexSessionStorage.ReadLastTurnModel(settings, "thread-1", path);
+        Assert.True(last.HasValue);
+        Assert.Equal("official-model", last.Value.Model);
+        Assert.Equal("openai", last.Value.Provider);
+        Assert.True(last.Value.ProviderRecorded);
+
+        // A legacy fork copies its parent's history after its own session_meta.
+        var fork = Path.Combine(privateHome, "sessions", "fork-1.jsonl");
+        WriteUtf8(fork, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"fork-1\",\"model_provider\":\"vsai_provider\"}}\n"
+            + "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-1\",\"model_provider\":\"openai\"}}\n"
+            + "{\"type\":\"turn_context\",\"payload\":{\"model\":\"official-model\"}}\n"
+            + SettingsApplied("fork-1", "vsai_provider", "official-model"));
+
+        last = CodexSessionStorage.ReadLastTurnModel(settings, "fork-1", fork);
+        Assert.True(last.HasValue);
+        Assert.Equal("official-model", last.Value.Model);
+        Assert.Equal("openai", last.Value.Provider);
+        Assert.True(last.Value.ProviderRecorded);
     }
 
     [Fact]
@@ -285,6 +320,10 @@ public sealed class CodexSessionStorageTests
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, contents, new UTF8Encoding(false));
     }
+
+    private static string SettingsApplied(string threadId, string provider, string model)
+        => "{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"thread_id\":\"" + threadId
+            + "\",\"thread_settings\":{\"model\":\"" + model + "\",\"model_provider_id\":\"" + provider + "\"}}}\n";
 
     private static void WriteModelCache(string home, string version, string fetchedAt, params string[] slugs)
     {

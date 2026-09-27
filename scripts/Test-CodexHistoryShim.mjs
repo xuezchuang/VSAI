@@ -454,4 +454,41 @@ window.dispatchEvent(event('message', { data: {
 assert.deepEqual(findByClass(root, 'codex-vs-history-row').map(row => row.children[0].textContent), ['Other workspace'],
     'an old workspace archive response must not change the new workspace history');
 
-console.log('Codex history shim pagination, workspace isolation, and archive interaction checks passed.');
+window.dispatchEvent(event('message', { data: { type: 'active-workspace-roots-updated' } }));
+root = openHistory();
+const forkHistory = [
+    { id: 'original-1', title: 'Shared title' },
+    { id: 'original-2', title: 'Second task' },
+    { id: 'original-3', title: 'Third task' },
+    { id: 'original-4', title: 'Fourth task' },
+    { id: 'fork-1', title: 'Shared title' },
+    { id: 'fork-2', title: 'Shared title' }
+];
+requests = hostMessages('recent-history-request');
+sendHistoryResponse(requests.at(-1), { items: forkHistory, hasMore: false, nextCursor: null });
+assert.equal(findByClass(root, 'codex-vs-history-row').length, 6,
+    'four originals and two forks must remain distinct even when they share a title');
+assert.match(findByClass(root, 'codex-vs-history-footer')[0].textContent, /6 local conversations/);
+findByClass(root, 'codex-vs-history-row')[0].dispatchEvent(event('click'));
+assert.equal(hostMessages('navigate-to-route').at(-1).path, '/local/original-1');
+
+for (const [index, expectedPath] of [[4, '/local/fork-1'], [5, '/local/fork-2']]) {
+    root = openHistory();
+    requests = hostMessages('recent-history-request');
+    sendHistoryResponse(requests.at(-1), { items: forkHistory, hasMore: false, nextCursor: null });
+    findByClass(root, 'codex-vs-history-row')[index].dispatchEvent(event('click'));
+    assert.equal(hostMessages('navigate-to-route').at(-1).path, expectedPath,
+        'a fork must navigate by its own ID, not its inherited title or parent ID');
+}
+
+root = openHistory();
+requests = hostMessages('recent-history-request');
+sendHistoryResponse(requests.at(-1), {
+    items: [{ id: 'fork-without-title', title: '' }], hasMore: false, nextCursor: null
+});
+assert.deepEqual(findByClass(root, 'codex-vs-history-row').map(row => row.children[0].textContent), ['New conversation'],
+    'a fork without a persisted title must still have a readable row');
+findByClass(root, 'codex-vs-history-row')[0].dispatchEvent(event('click'));
+assert.equal(hostMessages('navigate-to-route').at(-1).path, '/local/fork-without-title');
+
+console.log('Codex history shim pagination, workspace isolation, fork rows, and archive interaction checks passed.');

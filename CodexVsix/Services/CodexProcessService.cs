@@ -68,6 +68,8 @@ public sealed class CodexProcessService : IDisposable
     private readonly CodexDiagnosticLogger _diagnostics;
     private readonly bool _skipSessionMigration;
     private readonly IReadOnlyList<string>? _processConfigOverrides;
+    private readonly VsDebugToolDispatcher _debugTools;
+    private readonly CodexForkAwareThreadList _forkHistory;
     private CodexWindowsSandboxSetupCoordinator? _sandboxSetupCoordinator;
     private bool _useFreshWindowsSandboxReadiness;
 
@@ -114,11 +116,18 @@ public sealed class CodexProcessService : IDisposable
     internal CodexProcessService(
         CodexDiagnosticLogger diagnostics,
         bool skipSessionMigration,
-        IReadOnlyList<string>? processConfigOverrides)
+        IReadOnlyList<string>? processConfigOverrides,
+        IVsDebugToolService? debugToolService = null)
     {
         _diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
         _skipSessionMigration = skipSessionMigration;
         _processConfigOverrides = processConfigOverrides;
+        // Delay loading VS debugger interop until a debug tool is actually used.
+        _debugTools = debugToolService is null
+            ? new VsDebugToolDispatcher(() => new VisualStudioDebugService())
+            : new VsDebugToolDispatcher(debugToolService);
+        _forkHistory = new CodexForkAwareThreadList(catalogReadFailed: ex =>
+            _diagnostics.Write("history.fork-catalog.unavailable", new JObject { ["errorType"] = ex.GetType().Name }));
     }
 
     public string? CurrentThreadId
@@ -148,6 +157,14 @@ public sealed class CodexProcessService : IDisposable
         {
             var workingDirectory = ResolveWorkingDirectory(settings.WorkingDirectory);
             await EnsureServerReadyAsync(settings, workingDirectory, cancellationToken).ConfigureAwait(false);
+            if (method == "thread/list")
+            {
+                return await _forkHistory.ListAsync(
+                    CodexEnvironmentPathHelper.GetCodexHomeDirectory(settings.EnvironmentVariables),
+                    parameters as JObject ?? new JObject(),
+                    (page, token) => InvokeProviderRequestAsync(settings, method, page, token),
+                    cancellationToken).ConfigureAwait(false);
+            }
             return await InvokeProviderRequestAsync(settings, method, parameters, cancellationToken).ConfigureAwait(false);
         }
         finally { _providerGate.Release(); }
@@ -342,6 +359,7 @@ public sealed class CodexProcessService : IDisposable
         }
 
         RestartServer(clearConfig: true);
+        _debugTools.Dispose();
         _executionGate.Dispose();
         _lifecycleGate.Dispose();
         _providerGate.Dispose();
@@ -468,7 +486,8 @@ public sealed class CodexProcessService : IDisposable
         await EnsureServerReadyAsync(settings, workingDirectory, cancellationToken).ConfigureAwait(false);
 
         var currentThreadId = CurrentThreadId ?? settings.CurrentThreadId;
-        var items = await RequestThreadListItemsAsync(workingDirectory, cancellationToken).ConfigureAwait(false);
+        var privateHome = CodexEnvironmentPathHelper.GetCodexHomeDirectory(settings.EnvironmentVariables);
+        var items = await RequestThreadListItemsAsync(privateHome, workingDirectory, cancellationToken).ConfigureAwait(false);
         var threads = new List<CodexThreadSummary>();
         if (items is null)
         {
@@ -487,18 +506,18 @@ public sealed class CodexProcessService : IDisposable
         return threads;
     }
 
-    private async Task<JArray?> RequestThreadListItemsAsync(string workingDirectory, CancellationToken cancellationToken)
+    private async Task<JArray?> RequestThreadListItemsAsync(string privateHome, string workingDirectory, CancellationToken cancellationToken)
     {
         foreach (var candidate in GetThreadListWorkingDirectoryCandidates(workingDirectory))
         {
-            var items = await SendThreadListRequestAsync(candidate, 200, cancellationToken).ConfigureAwait(false);
+            var items = await SendThreadListRequestAsync(privateHome, candidate, 200, cancellationToken).ConfigureAwait(false);
             if (items is { Count: > 0 })
             {
                 return items;
             }
         }
 
-        var allItems = await SendThreadListRequestAsync(null, 500, cancellationToken).ConfigureAwait(false);
+        var allItems = await SendThreadListRequestAsync(privateHome, null, 500, cancellationToken).ConfigureAwait(false);
         if (allItems is null || allItems.Count == 0)
         {
             return allItems;
@@ -516,7 +535,7 @@ public sealed class CodexProcessService : IDisposable
         return filteredItems;
     }
 
-    private async Task<JArray?> SendThreadListRequestAsync(string? workingDirectory, int limit, CancellationToken cancellationToken)
+    private async Task<JArray?> SendThreadListRequestAsync(string privateHome, string? workingDirectory, int limit, CancellationToken cancellationToken)
     {
         var parameters = new JObject
         {
@@ -531,7 +550,8 @@ public sealed class CodexProcessService : IDisposable
             parameters["cwd"] = workingDirectory;
         }
 
-        var response = await SendRequestAsync("thread/list", parameters, cancellationToken).ConfigureAwait(false);
+        var response = await _forkHistory.ListAsync(privateHome, parameters,
+            (page, token) => SendRequestAsync("thread/list", page, token), cancellationToken).ConfigureAwait(false);
         return response?["data"] as JArray;
     }
 
@@ -1643,6 +1663,20 @@ public sealed class CodexProcessService : IDisposable
         var parameters = message["params"] as JObject;
         try
         {
+            // Host-owned tools execute in this VS instance, before the generic
+            // WebView relay. The same path also serves the classic WPF client.
+            if (method == "item/tool/call" && VsDebugTools.Owns(parameters))
+            {
+                lock (_syncRoot)
+                {
+                    if (_serverGeneration != generation) return;
+                }
+                var response = await _debugTools.ExecuteAsync(id, parameters!, generation).ConfigureAwait(false);
+                if (response is not null)
+                    await SendResponseAsync(generation, id, response).ConfigureAwait(false);
+                return;
+            }
+
             var appServerRequestHandler = AppServerRequestHandler;
             if (appServerRequestHandler is not null)
             {
@@ -1779,6 +1813,7 @@ public sealed class CodexProcessService : IDisposable
     {
         var method = message["method"]?.Value<string>() ?? string.Empty;
         var parameters = message["params"] as JObject;
+        _debugTools.ObserveNotification(method, parameters);
         if (string.Equals(method, "windowsSandbox/setupCompleted", StringComparison.Ordinal))
         {
             LogWindowsSandboxEvent("windows-sandbox.completed", method, parameters, _serverGeneration);
@@ -2256,6 +2291,7 @@ public sealed class CodexProcessService : IDisposable
     private async Task<JToken?> SendRequestAsync(string method, object? parameters, CancellationToken cancellationToken, long? expectedGeneration = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var requestParameters = VsDebugTools.PrepareRequest(method, ConvertParameters(parameters));
         var id = Interlocked.Increment(ref _nextRequestId);
         var tcs = new TaskCompletionSource<JToken?>(TaskCreationOptions.RunContinuationsAsynchronously);
         long generation;
@@ -2272,6 +2308,7 @@ public sealed class CodexProcessService : IDisposable
             _pendingRequests[id] = new PendingRequest(generation, method, tcs);
         }
 
+        if (method == "turn/interrupt") _debugTools.Interrupt(requestParameters, generation);
         _diagnostics.Write(
             "appserver.request.sent",
             new JObject
@@ -2305,7 +2342,7 @@ public sealed class CodexProcessService : IDisposable
                 {
                     ["id"] = id,
                     ["method"] = method,
-                    ["params"] = ConvertParameters(parameters)
+                    ["params"] = requestParameters
                 }, generation);
             }
             catch (Exception ex)
@@ -5175,6 +5212,7 @@ public sealed class CodexProcessService : IDisposable
     {
         message = RedactProviderSecrets(message);
         List<TaskCompletionSource<JToken?>> pendingRequests;
+        long nextGeneration;
         ActiveTurnState? turnState;
         StreamWriter? input;
 
@@ -5197,7 +5235,7 @@ public sealed class CodexProcessService : IDisposable
 
             turnState = _activeTurn;
             _activeTurn = null;
-            ++_serverGeneration;
+            nextGeneration = ++_serverGeneration;
             _providerRouter.ServerStopped();
             input = _serverInput;
             _threadId = null;
@@ -5209,6 +5247,8 @@ public sealed class CodexProcessService : IDisposable
             _initializedTcs?.TrySetException(new InvalidOperationException(message));
         }
 
+        _debugTools.RetireBefore(nextGeneration);
+        _forkHistory.Clear();
         try
         {
             input?.Dispose();
@@ -5246,6 +5286,7 @@ public sealed class CodexProcessService : IDisposable
         ActiveTurnState? turnState;
         StreamWriter? input;
         List<TaskCompletionSource<JToken?>> pendingRequests;
+        long nextGeneration;
 
         lock (_syncRoot)
         {
@@ -5257,7 +5298,7 @@ public sealed class CodexProcessService : IDisposable
 
             turnState = _activeTurn;
             _activeTurn = null;
-            ++_serverGeneration;
+            nextGeneration = ++_serverGeneration;
             process = _serverProcess;
             input = _serverInput;
             pendingRequests = _pendingRequests.Values.Select(request => request.Completion).ToList();
@@ -5279,6 +5320,8 @@ public sealed class CodexProcessService : IDisposable
             _providerRouter.ServerStopped();
         }
 
+        _debugTools.RetireBefore(nextGeneration);
+        _forkHistory.Clear();
         turnState?.TrySetResult(1);
 
         foreach (var pendingRequest in pendingRequests)

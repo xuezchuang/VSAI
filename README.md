@@ -1,320 +1,143 @@
-# VSAI
+<div align="center">
+  <img src="CodexVsix/Resources/MarketplaceIcon.png" alt="VSAI" width="88" height="88">
+  <h1>VSAI</h1>
+  <p><strong>在 Visual Studio 里读懂代码，也看见调试现场。</strong></p>
+  <p>Visual Studio 2022 / 2026 · Windows x64 · 源码版本 1.0.9 · MIT</p>
+  <p>
+    <a href="https://vsix.snowsome.com">下载安装</a> ·
+    <a href="#快速开始">快速开始</a> ·
+    <a href="#调试现场分析">调试现场分析</a> ·
+    <a href="docs/development.md">开发文档</a>
+  </p>
+</div>
 
-个人使用的 Visual Studio Codex 定制版，版本 **1.0.0**。本仓库保持私有，不发布到 Visual Studio Marketplace。
+---
 
-主界面使用原有 Codex WebView，保留文件夹选择、会话安全、文件跳转和设置持久化修复。原生界面仅用于 WebView 加载失败时的回退。
+VSAI 将 Codex 嵌入完整的 Visual Studio：结合当前工程、选中代码和编辑器上下文进行分析，点击回答中的源码引用即可回到对应位置。适合日常代码阅读、C++ / SVN 工程维护，以及断点和异常现场排查。
 
-基于 [Visual Codex Studio](https://github.com/rodrigojager/codex-visual-studio-extension) 1.3.4，保留上游历史、LICENSE 和第三方资源声明。
-本地构建输出为 `CodexVsix\VSAI.vsix`，在 Visual Studio 的“视图 → VSAI”打开。
+扩展通过本机 Codex CLI 工作，支持 ChatGPT 官方账号与自定义模型服务。主界面使用适配后的 Codex WebView，加载失败时提供经典 WPF 界面。
 
-## VSAI 会话与共享记忆
+## 能做什么
 
-VSAI 的官方模型和自定义模型统一使用独立会话库。默认目录是 `%USERPROFILE%\.codex\vsai`；如果设置了 `CODEX_HOME`，则使用该目录下的 `vsai` 子目录。数据库、会话日志、归档和运行日志均留在这个私有目录，后续对话不会进入桌面端的历史列表。切换模型不会切换会话库。
+| 场景 | VSAI 的支持 |
+| --- | --- |
+| **读懂工程** | 结合当前文档、选区和打开的文件分析代码，通过 `@file` 查找并补充工程文件。 |
+| **定位源码** | 点击回答中的文件与行号引用，在 VS 中打开对应位置。 |
+| **分析调试现场** | 1.0.9 新增内置调试工具，按需读取调用堆栈、参数、局部变量和其他线程。 |
+| **切换模型** | 统一管理官方模型和第三方服务，按模型选择可用的推理选项。 |
+| **继续之前的工作** | 使用独立会话库，按当前工作目录展示历史，保存每个解决方案选择的工作目录。 |
+| **在 IDE 内协作** | 流式回答、工具过程、审批、图片附件、代码差异与 Mermaid 图表。 |
 
-首次启动时仅复制原 Codex home 的配置、用户指令和模型缓存作为初始快照，后续设置页编辑的是 VSAI 自己的文件。第三方服务设置继续使用现有的加密存储。账号的 `auth.json` 不复制，私有客户端固定使用自己的文件凭据存储；已有配置中的服务参数保留。模型列表始终保留 CLI 返回的官方模型，并与第三方模型同时显示。首次使用官方订阅时，在设置 → 模型与服务 → ChatGPT 官方订阅中登录一次；登录完成后自动刷新状态与模型列表。VSAI 的登录、退出和认证检查都指向私有目录，不影响桌面端登录。
+## 快速开始
 
-首次连接会自动扫描原库的普通及已归档历史，并只读核对本地索引，识别 `codex-vsix` 创建或使用 `vsai_` 服务的会话。先在 `vsai\migration-backups` 备份原始日志；分页历史连同其依赖的原始父记录复制到新库，再由 app-server 重建独立索引，保留会话 ID。仅用作历史依赖的非 VSAI 父记录在新库归档，其桌面端原记录不变。旧格式历史通过完整副本导入。ID 对应关系和进度保存在 `vsai\session-migration-manifest.json`。验证完整历史及源文件未变化后才归档原记录，原文件不会删除。原先已归档的会话在新库中仍保持归档状态；只有初始化信息、没有对话及父历史引用的空记录仅备份，不生成空会话。
+### 使用前准备
 
-正在运行、日志损坏、超出迁移大小限制或导入结果无法确认的会话会保留原记录，并提示迁移未完成；不阻止使用新库。关闭旧会话后重启 VS 可重试。若清单显示 `fork-outcome-unknown`，须先核对新库中的导入结果，不能直接清空清单重试，否则可能重复导入。旧版 WebView 缓存保留，新版使用单独缓存以避免恢复已迁移的旧 ID。
+| 项目 | 要求 |
+| --- | --- |
+| Visual Studio | 2022 或 2026，64 位，包含核心编辑器组件 |
+| .NET Framework | 4.7.2 或更高版本 |
+| Codex CLI | 本机已安装，支持 `codex app-server` |
+| 模型服务 | 可用的 ChatGPT 官方登录或第三方服务配置 |
 
-共享记忆读取原 home 下的 `memories\memory_summary.md`，并指向同目录的 `MEMORY.md`、`rollout_summaries` 和 `skills`。VSAI 在创建、恢复、分叉会话时注入这份共享上下文，关闭私有库的自动记忆生成。自动整理仍由桌面端负责，VSAI 私有历史不会自动进入桌面端的记忆提炼；用户明确要求记住的内容按共享目录的 `memories\extensions\ad_hoc\notes` 流程追加。
-
-以下为上游文档，版本与公开发行信息属于上游项目。
-
-## Visual Codex Studio (upstream)
-
-Run Codex inside Visual Studio without leaving the IDE.
-
-`Visual Codex Studio` is a 64-bit VSIX for Visual Studio 2022 and Visual Studio
-2026. It hosts the local Codex CLI through `codex app-server`, adapts the Codex
-WebView to Visual Studio, and connects conversations to the active solution,
-editor, theme, and user settings.
-
-Current release: [v1.3.4](https://github.com/rodrigojager/codex-visual-studio-extension/releases/tag/v1.3.4)
-
-> [!WARNING]
-> This project is not actively maintained. The 1.3.x updates were exceptional
-> maintenance releases and do not imply ongoing development or
-> support. Issues and pull requests may not be reviewed. Fork the repository if
-> you need continued maintenance or compatibility work for future Codex and
-> Visual Studio versions.
-
-> [!IMPORTANT]
-> This is an independent project. It is not affiliated with, endorsed by, or
-> officially associated with OpenAI or ChatGPT. Logos and product references are
-> used only to describe the integration.
-
-## What's New in 1.3.4
-
-- The extension makes several attempts to recover the modern Codex interface
-  before using the classic fallback.
-- A problem limited to the settings window no longer changes the main chat to
-  the classic interface.
-- Classic fallback screens now include an action to try the modern interface
-  again without restarting Visual Studio.
-- Provider and app-server errors are displayed more clearly, while optional
-  diagnostic logs contain more useful request, response, and recovery details.
-
-## What It Provides
-
-### Codex inside Visual Studio
-
-- Dockable Codex chat in the Visual Studio tool window area.
-- Frozen Codex WebView adapted to Visual Studio WebView2, theme resources, locale,
-  and the local app-server transport.
-- Normal and plan collaboration modes.
-- Runtime model discovery with model-specific reasoning options, verbosity,
-  service tier, approval policy, and sandbox controls.
-- Streaming assistant output, tool activity, approvals, interactive questions,
-  Markdown, diffs, and Mermaid diagrams.
-- Clipboard and file-picker image attachments sent as app-server `localImage`
-  inputs.
-- Session usage and rate-limit information when supplied by the Codex runtime.
-- Bounded local recent-task history instead of the incompatible cloud-task view.
-
-### Visual Studio context and commands
-
-- Active document, selected text, and open editor tabs are sent through the IDE
-  context contract when IDE context is enabled.
-- Solution-aware `@file` search is asynchronous, bounded, and excludes generated
-  directories and reparse points.
-- Editor context-menu commands can add a selection to the current thread, review
-  selected code, or ask Codex to implement it.
-- Solution Explorer can add the selected file to the current thread.
-- Visual Studio commands are available for opening Codex, starting a new agent,
-  and opening settings.
-- Plan questions use a separate prompt window so the main conversation remains
-  visible.
-
-### Settings
-
-- Settings open in an independent Visual Studio document tab, leaving chat
-  available at the same time.
-- Changes are persisted immediately and invalidate all active chat consumers;
-  there is no Apply button or extension restart requirement.
-- Configurable executable path, working directory, model, reasoning, verbosity,
-  service tier, profile, approvals, sandbox, follow-up behavior, composer Enter
-  behavior, review delivery, managed MCP servers, and startup behavior.
-- Optional local diagnostic logging for investigating display or docking
-  problems, disabled by default.
-- UI localization for English, Brazilian Portuguese, Spanish, French, and German.
-- Visual Studio theme integration for light and dark environments.
-
-### Long-conversation behavior
-
-The extension deliberately avoids materializing an entire large conversation in
-the Visual Studio WebView at once:
-
-- Initial history is limited to the most recent 120 turns or 2 MB.
-- Older history is loaded explicitly in batches of 20 turns, with a 512 KB batch
-  budget.
-- Large messages, diffs, tool output, and streams are limited only in the Visual
-  Studio display copy. The full content remains in the Codex session history.
-- Browser-native lazy rendering reduces work for content outside the visible
-  viewport.
-- Manual context compaction is available, with optional automatic compaction after
-  a completed turn reaches 85% context usage.
-
-These controls improve responsiveness, but they do not make conversation size
-unlimited. Runtime, model-context, and machine-resource limits still apply.
-
-## Requirements
-
-- Visual Studio 2022 or Visual Studio 2026, 64-bit, with the Core Editor workload.
-- .NET Framework 4.7.2 or newer.
-- Codex CLI installed locally and available through `codex`, `codex.cmd`, or the
-  executable path selected in extension settings.
-- A working per-user Codex login or provider configuration.
-
-The VSIX does not bundle the Codex CLI or an OpenAI account.
-
-## Installation
-
-1. Install the Codex CLI and verify that `codex --version` works in a terminal.
-2. Run `codex login` with the ChatGPT account that will use Visual Studio, or
-   configure that user's provider in `~/.codex/config.toml`.
-3. Download the VSIX from
-   [GitHub Releases](https://github.com/rodrigojager/codex-visual-studio-extension/releases/latest)
-   or use the Marketplace package when available.
-4. Run the VSIX installer and follow its instructions for the desired Visual
-   Studio instances.
-5. Open Visual Studio and choose `View > Codex`. The canonical command is
-   `View.VisualCodexStudio` and can be assigned a keyboard shortcut.
-
-If authentication is missing, the extension's Account settings can open the
-local `codex login` flow.
-
-## Authentication and Local Data
-
-Authentication always belongs to the Windows user running Visual Studio. The
-recommended path is that user's own `codex login` session. Advanced local setups
-can instead use:
-
-- `OPENAI_API_KEY` in that user's environment.
-- Provider configuration in `~/.codex/config.toml`.
-- A Codex profile that selects provider-specific configuration.
-
-No ChatGPT cookie, token, API key, `auth.json`, publisher credential, or signing
-key is bundled in the repository or VSIX. The WebView is not given
-`OPENAI_API_KEY` from the Visual Studio process.
-
-Extension settings are stored at `%LOCALAPPDATA%\CodexVsix\settings.json`, outside
-the repository and VSIX. Sensitive extension settings and prompt history are
-protected for the current Windows user with DPAPI and written atomically. Codex
-authentication and provider configuration remain under that user's Codex home
-directory and must never be copied into this repository.
-
-When enabled, optional diagnostics are stored under
-`%LOCALAPPDATA%\CodexVsix\logs`. They do not intentionally record prompts,
-responses, or request contents and filter common credential formats, but error
-details can still include local paths or other environment information. Review
-the files before sharing them publicly.
-
-## Configuration Notes
-
-- Provider and profile behavior should be configured in `~/.codex/config.toml`.
-- The settings UI supports extra model, reasoning, verbosity, and service-tier
-  entries for runtimes that expose options newer than this frozen extension.
-- Additional CLI arguments, environment overrides, and raw TOML overrides are
-  advanced per-user settings. They are passed to the local runtime and should be
-  reviewed before use.
-- Attached local images must remain readable until the turn starts.
-- The embedded WebView is a frozen bundle. A future Codex CLI or protocol change
-  may require source changes that this unmaintained project will not receive.
-
-## Build and Test
-
-Release packaging requires full Visual Studio MSBuild.
+VSIX 不包含 Codex CLI。CLI 的安装方式见 [Codex 官方文档](https://developers.openai.com/codex/cli/)，安装后可在终端确认：
 
 ```powershell
-$vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
-$install = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
-$msbuild = Join-Path $install "MSBuild\Current\Bin\MSBuild.exe"
-
-[xml]$props = Get-Content Directory.Build.props -Raw
-$version = [string]$props.Project.PropertyGroup.Version
-
-dotnet restore CodexVs2026Extension.sln `
-  --locked-mode `
-  -p:NuGetAudit=true `
-  -p:NuGetAuditMode=all `
-  -p:WarningsAsErrors=NU1901%3BNU1902%3BNU1903%3BNU1904
-
-dotnet test CodexVs2026Extension.sln -c Release --no-restore
-
-& $msbuild `
-  CodexVsix\CodexVsix.csproj `
-  /t:Rebuild `
-  /m:1 `
-  /nr:false `
-  /p:Configuration=Release `
-  /p:RestoreLockedMode=true `
-  /p:BuildVsixPackage=true
-
-.\scripts\Test-VsixPackage.ps1 `
-  -VsixPath CodexVsix\VSAI.vsix `
-  -ExpectedVersion $version
+codex --version
 ```
 
-`dotnet build` can compile the projects, but the final VSIX should be produced
-with Visual Studio `MSBuild.exe`. The package verifier checks manifest and
-assembly versions, required WebView assets, third-party runtime versions,
-credential filenames, private signing material, and package signatures.
+### 安装与第一次对话
 
-GitHub CI performs locked restore with NuGet auditing, tests, packaging, and VSIX
-verification. Tagged releases are signed only when all repository signing secrets
-are configured; otherwise the workflow publishes a verified unsigned package.
-Visual Studio Marketplace publication is intentionally manual.
+1. 从 **[VSAI Gallery](https://vsix.snowsome.com)** 下载 VSIX。关闭目标 VS 实例后，运行安装包并选择对应实例。
+2. 打开解决方案，在 **视图 → VSAI** 打开聊天窗口。
+3. 打开设置，在 **模型与服务 → ChatGPT 官方订阅 → 登录官方账号** 完成登录；使用第三方服务时，在同一页面添加服务和模型。
+4. 确认工作目录与模型，创建聊天。若未找到 CLI，在设置中指定本机 Codex 可执行文件路径。
+5. 选中一段代码加入对话，或用 `@file` 指定文件，开始提问。
 
-## Changelog
+> 本文对应 **1.0.9 源码**，可下载版本以 Gallery 为准。VS 中的官方登录属于 VSAI 独立账号目录，需要首次登录一次。
 
-### 1.3.4 - 2026-07-22
+**可以这样开始：**
 
-- Recovers the modern interface through windowed WebView2, composition WebView2,
-  and an isolated recovery profile before falling back to classic WPF.
-- Detects a missing `webview-ready` signal, logs every recovery attempt, and adds
-  a "Try the modern interface again" action to classic fallback surfaces.
-- Keeps a settings-only WebView failure local instead of downgrading the main chat.
-- Retries the official interface after Visual Studio restarts instead of keeping
-  a transient WebView fallback across later sessions.
-- Handles scalar errors from custom providers without a Newtonsoft `JValue`
-  parsing failure and surfaces the provider's actual message.
-- Records app-server requests, response outcomes, stderr, and process failures
-  when diagnostic logging is enabled, without logging prompts or request payloads.
-- Opens classic settings on a usable section instead of an empty panel.
+> 分析这个函数的输入、分支和调用链，指出结果最终在哪里使用。先只分析。
 
-### 1.3.3 - 2026-07-18
+> 结合当前选区定位问题，给出最小修改，并说明还需要验证什么。
 
-- Improved reliability when the Codex panel is docked, floating, or moved.
-- Remembered the interface that works on each computer and added an automatic
-  fallback, without loading two interfaces at the same time.
-- Preserved the responsiveness improvements from 1.3.1 by reloading the panel
-  only when Visual Studio actually moves it to another window.
-- Added optional local diagnostic logs, disabled by default, and fixed their
-  switch so it appears correctly under General settings.
-- Expanded automated coverage for docking, fallback, diagnostics, and release
-  packaging.
+<details>
+<summary>将 VSAI Gallery 添加到 Visual Studio</summary>
 
-### 1.3.1 - 2026-07-16
+在 VS 的 **工具 → 选项 → 环境 → 扩展** 中添加附加扩展库，名称填写 `VSAI`，地址填写：
 
-- Reduced editor slowdown while the Codex tool window is open.
-- Prevented the official WebView and the classic interface from loading at the
-  same time.
-- Kept the classic interface as a fallback when the official interface cannot
-  load.
-- Deferred automatic opening until Visual Studio reaches an idle state.
-- Improved cleanup of the tool window and WebView resources.
-- Added regression tests for the new loading and startup behavior.
+```text
+https://vsix.snowsome.com/atom.xml
+```
 
-### 1.3.0 - 2026-07-11
+入口说明见 [Visual Studio 私有扩展库文档](https://learn.microsoft.com/en-us/visualstudio/extensibility/private-galleries)。也可以直接从 Gallery 页面下载安装包。
 
-- Replaced the older presentation with the adapted Codex WebView, Visual Studio
-  theme integration, Codex-style header/composer, and an independent settings tab.
-- Added current IDE commands and context menus for selections, files, reviews, and
-  implementation requests.
-- Added active document, selection, and open-tab context using the WebView's
-  expected IDE contract.
-- Added runtime model discovery and host metadata so the assistant can identify
-  the selected model and reasoning effort.
-- Added bounded history loading, lazy rendering, display-only payload limits,
-  manual compaction, and optional automatic compaction for long conversations.
-- Replaced incompatible cloud task history with a bounded local task-history
-  popover.
-- Updated app-server support for reviews, steering, approvals, permissions,
-  elicitation, plugins, MCP operations, authentication, and logout.
-- Hardened process cancellation, follow-up queues, attachments, solution search,
-  Markdown/Mermaid rendering, settings persistence, and WebView dispatch.
-- Protected sensitive local settings with DPAPI and added package checks that
-  reject credential and private signing files.
-- Added locked dependency restore, NuGet auditing, 101 automated tests, reproducible
-  versioning, VSIX verification, and optional release signing.
+</details>
 
-### 1.2.1 - 2026-05-01
+## 调试现场分析
 
-- Refreshed the VSIX manifests and packaged extension metadata.
+**1.0.9 源码新增：把当前 VS 实例的暂停现场交给模型分析，无需单独配置 MCP。**
 
-### 1.2.0 - 2026-05-01
+> **发布与验证状态**：1.0.9 已发布到 Gallery，并通过自动化回归和 VS2026 安装校验；调试现场读取仍待 VS 实机验证。
 
-- Renamed the extension to Visual Codex Studio and refreshed its iconography.
-- Added conversation rename support and keyboard command registration.
-- Virtualized chat history and buffered large message updates to reduce UI churn.
-- Fixed history loading, rate-limit presentation, and layout instability.
+1. 在 VS 中开始调试，停在断点或异常处。
+2. 在安装了 1.0.9 的 VSAI 中**新建聊天**。
+3. 输入下面这样的请求，模型即可按需读取现场，并结合源码追踪原因。
 
-See [CHANGELOG.md](CHANGELOG.md) for the complete release history and detailed
-change list.
+> 分析当前断点为什么出错。先看调用堆栈，再检查相关栈帧的参数和局部变量；区分现场证据与推测，先不要改代码。
 
-## Repository Layout
+| 内置工具 | 读取内容 |
+| --- | --- |
+| `vs_debug_snapshot` | 调试状态、可用停止原因、当前线程的调用堆栈与源码位置 |
+| `vs_debug_frame_variables` | 指定栈帧的参数和局部变量 |
+| `vs_debug_threads` | 同一次暂停中的其他进程、线程及有数量限制的堆栈 |
 
-- `CodexVsix/`: Visual Studio extension, app-server host, WebView bridge, and UI.
-- `CodexVsix.Tests/`: automated regression and package-contract tests.
-- `scripts/Test-VsixPackage.ps1`: release package verifier.
-- `scripts/Set-VsixVersion.ps1`: synchronized version updater.
-- `marketplace/overview.md`: Marketplace-facing product description.
-- `THIRD-PARTY-NOTICES.md`: bundled third-party notices and reviewed asset hashes.
+工具通过 VSAI 直接注册到 Codex app-server，WebView 与经典界面共用。它们只读取现场，不控制程序运行，不切换当前线程或栈帧，也不执行任意表达式。
 
-## License and Third-Party Code
+**当前边界**
 
-The project source is available under the [MIT License](LICENSE). Bundled
-third-party components and the frozen WebView provenance are documented in
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) and
-[`CodexVsix/UI/CodexWebview/SOURCE.md`](CodexVsix/UI/CodexWebview/SOURCE.md).
+- 继续、单步或停止调试后，旧现场标识失效，后续分析需要重新获取快照。
+- 缺少调试符号、编译优化或读取限额会影响可见数据，结果会标识不可用或截断情况。
+- 读取参数和局部变量时关闭隐式属性及函数求值；对象成员展开暂不提供。
+- 工具依赖 app-server 的实验性 `dynamicTools` 接口。升级前创建的聊天需要重新新建；升级后创建的聊天可继续恢复。
+- 现场数据会作为工具结果交给当前所选模型，并随聊天历史保存。堆栈能帮助定位故障，根因仍需结合源码、变量与复现结果判断。
+
+## 常见问题
+
+<details>
+<summary><strong>桌面端已经登录，为什么 VSAI 还要登录？</strong></summary>
+
+VSAI 使用独立账号与会话目录，默认位于 `%USERPROFILE%\.codex\vsai`。在 VSAI 设置里登录一次即可，登录和退出不会改变桌面端的账号状态。
+
+</details>
+
+<details>
+<summary><strong>切换模型或解决方案后，历史记录在哪里？</strong></summary>
+
+官方模型与第三方模型共用 VSAI 的独立会话库。历史列表按当前工作目录筛选；切回原工作目录可查看对应历史。工作目录会按解决方案保存。
+
+</details>
+
+<details>
+<summary><strong>设置、会话和日志保存在哪里？</strong></summary>
+
+扩展设置位于 `%LOCALAPPDATA%\VSAI\settings.json`；启用诊断后，诊断日志位于 `%LOCALAPPDATA%\VSAI\logs`。会话、Codex 配置和运行日志位于独立 Codex home。
+
+目录覆盖规则、旧会话迁移和共享记忆详见 [本地数据与会话](docs/local-data.md)。
+
+</details>
+
+<details>
+<summary><strong>主界面加载失败时怎么办？</strong></summary>
+
+扩展会尝试恢复 WebView，失败后提供经典界面。可通过回退界面的重试入口重新加载，也可以启用诊断日志定位问题。报告问题时请注明 VS、VSAI 和 Codex CLI 版本及复现步骤。
+
+</details>
+
+## 开发与项目来源
+
+- [开发、验证与打包](docs/development.md)：工程入口、版本同步、构建命令和验证边界。
+- [本地数据与会话](docs/local-data.md)：配置目录、登录隔离、迁移和共享记忆。
+- [第三方声明](THIRD-PARTY-NOTICES.md) · [WebView 来源](CodexVsix/UI/CodexWebview/SOURCE.md) · [上游变更历史](CHANGELOG.md)
+
+VSAI 基于 [Visual Codex Studio](https://github.com/rodrigojager/codex-visual-studio-extension) 定制，保留上游版权与 [MIT 许可](LICENSE)。本项目独立维护，与 OpenAI / ChatGPT 无官方隶属或背书关系。
